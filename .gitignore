@@ -1,0 +1,13 @@
+.DS_Store
+.env
+.env.*
+*.nemo
+*.tar
+*.tar.gz
+*.wav
+*.mp3
+*.flac
+.venv/
+**/__pycache__/
+*.pyc
+.ipynb_checkpoints/
