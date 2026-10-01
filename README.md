@@ -40,8 +40,18 @@ Expected data layout after downloads:
 /project/community/rmwisene/datasets/
 ├── kinyarwanda_tts/       # train/adapt  (HF: mbazaNLP/kinyarwanda-tts-dataset)
 ├── kidawida_cv27/         # train/adapt  (Mozilla Data Collective)
-└── fleurs_kinyarwanda/    # eval only    (HF: mbazaNLP/fleurs-kinyarwanda)
+└── fleurs_kinyarwanda/    # baseline eval only (HF: mbazaNLP/fleurs-kinyarwanda)
 ```
+
+## Data roles (fixed)
+
+| Dataset | Role | Notes |
+|---------|------|--------|
+| `kinyarwanda_tts` | **Train / adapt** (Kin) | No official splits — optional fixed held-out (e.g. 90/10, seed=42) for training checks only |
+| `kidawida_cv27` | **Train / adapt** (Dav) | Use CV `train` / `dev` / `test` |
+| `fleurs_kinyarwanda` | **Baseline evaluation only** (Kin) | Do **not** train or adapt on this set |
+
+Nothing changes: **FLEURS stays baseline evaluation** for Kinyarwanda.
 
 ## Environment
 
@@ -104,5 +114,5 @@ ls "$DATA"
 ## Notes
 
 - Kidaw’ida is from **Mozilla Data Collective**, not Hugging Face.
-- Do **not** train on `fleurs_kinyarwanda` — baseline evaluation only.
+- **`fleurs_kinyarwanda` = baseline evaluation only** — never use it for training/adaptation.
 - Never store large audio under `~/` (home quota); never commit API keys.
