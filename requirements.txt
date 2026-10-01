@@ -1,0 +1,9 @@
+# Python deps for loading / smoking baselines (Orchard healthtts env)
+torch
+torchaudio
+transformers>=4.33
+accelerate
+scipy
+soundfile
+huggingface_hub
+pyyaml

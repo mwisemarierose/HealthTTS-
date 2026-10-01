@@ -1,0 +1,35 @@
+# HealthTTS baseline checkpoints (download to project storage, not this repo).
+#
+# On Orchard:
+#   export BASELINES=/project/community/rmwisene/tts_baselines
+#   bash scripts/download_baselines.sh
+
+baselines:
+  mms_tts_kin:
+    hf_id: facebook/mms-tts-kin
+    url: https://huggingface.co/facebook/mms-tts-kin
+    role: kin_baseline
+    framework: transformers  # VitsModel
+    license: cc-by-nc-4.0
+    local_dir: mms_tts_kin
+    eval_on:
+      - fleurs_kinyarwanda
+
+  kinya_flex_tts:
+    hf_id: wixdivin/kinya-flex-tts
+    url: https://huggingface.co/wixdivin/kinya-flex-tts
+    role: kin_baseline
+    framework: deepkin  # FlexKinyaTTS + kinya_flex_tts_base_trained.pt
+    license: cc-by-4.0
+    local_dir: kinya_flex_tts
+    checkpoint_file: kinya_flex_tts_base_trained.pt
+    eval_on:
+      - fleurs_kinyarwanda
+    notes: >
+      Custom DeepKIN Flex TTS (MB-iSTFT-VITS2). Inference needs DeepKIN-AgAI.
+      Speakers: 0=Female1, 1=Female2, 2=Male. Sample rate 24 kHz.
+
+# Kidaw'ida: no dedicated public baseline yet — start from Kin MMS then adapt on kidawida_cv27.
+dav_init:
+  from_baseline: mms_tts_kin
+  adapt_data: kidawida_cv27

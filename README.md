@@ -116,3 +116,44 @@ ls "$DATA"
 - Kidaw’ida is from **Mozilla Data Collective**, not Hugging Face.
 - **`fleurs_kinyarwanda` = baseline evaluation only** — never use it for training/adaptation.
 - Never store large audio under `~/` (home quota); never commit API keys.
+
+## Load baselines (Kin)
+
+Checkpoints go on **project storage** (not in this git repo):
+
+```text
+/project/community/rmwisene/tts_baselines/
+├── mms_tts_kin/          # facebook/mms-tts-kin
+└── kinya_flex_tts/       # wixdivin/kinya-flex-tts  (kinya_flex_tts_base_trained.pt)
+```
+
+| Baseline | Hub | Role |
+|----------|-----|------|
+| MMS-TTS Kin | [facebook/mms-tts-kin](https://huggingface.co/facebook/mms-tts-kin) | Kin VITS baseline (Transformers) — eval on FLEURS |
+| Kinya-Flex-TTS | [wixdivin/kinya-flex-tts](https://huggingface.co/wixdivin/kinya-flex-tts) | Kin Flex/VITS2 baseline (DeepKIN `.pt`) — eval on FLEURS |
+
+### Download on Orchard
+
+```bash
+conda activate healthtts
+cd ~/HealthTTS
+pip install -r requirements.txt
+
+export BASELINES=/project/community/rmwisene/tts_baselines
+bash scripts/download_baselines.sh
+```
+
+### Smoke-test MMS-TTS Kin
+
+```bash
+export BASELINES=/project/community/rmwisene/tts_baselines
+python scripts/smoke_mms_tts_kin.py \
+  --text "Muraho. Amakuru yawe?" \
+  --out /tmp/mms_tts_kin_smoke.wav
+```
+
+### Kinya-Flex-TTS note
+
+Weights download with the script (`kinya_flex_tts_base_trained.pt`). Runtime inference uses **DeepKIN** (`FlexKinyaTTS`), not Transformers — wire that up after the weights are local. Speakers: `0` Female1, `1` Female2, `2` Male (24 kHz).
+
+Dav has no public dedicated baseline yet; later adaptation can init from MMS Kin + `kidawida_cv27`.
