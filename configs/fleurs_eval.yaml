@@ -1,0 +1,36 @@
+# FLEURS Kinyarwanda — baseline evaluation cleaning (eval only; never train).
+
+data_root: /project/community/rmwisene/datasets/fleurs_kinyarwanda
+# Official FLEURS splits on disk (from HF download)
+splits:
+  # primary reported baseline split
+  - test
+  # optional validation / tuning; still eval-only, never train
+  - dev
+
+# Do not include train in baseline evaluation manifests.
+exclude_splits:
+  - train
+
+audio:
+  # archives from HF (extract once if not already unpacked)
+  archives:
+    - audio/test.tar.xz
+    - audio/dev.tar.xz
+  # after extract, clips usually under audio/ or similar
+  search_roots:
+    - audio
+    - .
+
+cleaning:
+  min_chars: 1
+  max_chars: 500
+  min_duration_s: 0.3
+  max_duration_s: 30.0
+  drop_missing_audio: true
+  normalize_unicode_nfc: true
+  collapse_whitespace: true
+
+output:
+  dir: /project/community/rmwisene/datasets/fleurs_kinyarwanda/processed/eval
+  # written: test.tsv, dev.tsv, summary.json

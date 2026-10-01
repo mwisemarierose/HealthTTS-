@@ -30,8 +30,11 @@ def main() -> None:
     )
     parser.add_argument(
         "--out",
-        default="/tmp/mms_tts_kin_smoke.wav",
-        help="Output wav path",
+        default=os.environ.get(
+            "BASELINES", "/project/community/rmwisene/tts_baselines"
+        )
+        + "/smoke/mms_tts_kin_smoke.wav",
+        help="Output wav path (default: under project baselines/smoke/)",
     )
     args = parser.parse_args()
 

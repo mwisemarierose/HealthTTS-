@@ -157,3 +157,30 @@ python scripts/smoke_mms_tts_kin.py \
 Weights download with the script (`kinya_flex_tts_base_trained.pt`). Runtime inference uses **DeepKIN** (`FlexKinyaTTS`), not Transformers — wire that up after the weights are local. Speakers: `0` Female1, `1` Female2, `2` Male (24 kHz).
 
 Dav has no public dedicated baseline yet; later adaptation can init from MMS Kin + `kidawida_cv27`.
+
+## Clean FLEURS for baseline evaluation
+
+Eval data only (`test` + `dev`). **Train split is never written into eval manifests.**
+
+```bash
+conda activate healthtts
+cd ~/HealthTTS
+# git pull   # after you push from Mac
+
+# 1) see what's on disk (TSV headers, audio tars)
+python scripts/inspect_fleurs.py
+
+# 2) extract archives + write cleaned manifests
+python scripts/clean_fleurs_eval.py --config configs/fleurs_eval.yaml
+```
+
+Outputs (on project):
+
+```text
+/project/community/rmwisene/datasets/fleurs_kinyarwanda/processed/eval/
+├── test.tsv          # primary baseline eval
+├── dev.tsv           # optional
+└── summary.json      # kept / dropped counts
+```
+
+Cleaning rules: Unicode NFC, whitespace collapse, drop empty text, missing audio, and extreme durations (default 0.3–30s).
