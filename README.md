@@ -20,7 +20,7 @@ HealthTTS/
 
 ```bash
 cd ~
-git clone https://semanticservices.ghe.com/Marie-Rose-MWISENEZA/HealthTTS.git HealthTTS
+git clone https://github.com/mwisemarierose/HealthTTS-.git HealthTTS
 cd HealthTTS
 ```
 
