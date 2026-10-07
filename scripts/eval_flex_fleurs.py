@@ -57,8 +57,9 @@ def main() -> None:
     if deepkin.is_dir() and str(deepkin) not in sys.path:
         sys.path.insert(0, str(deepkin))
 
+    import numpy as np
+    import soundfile as sf
     import torch
-    import torchaudio
     from deepkin.data.kinya_norm import text_to_sequence
     from deepkin.models.flex_tts import FlexKinyaTTS
     from deepkin.modules.tts_commons import intersperse
@@ -128,13 +129,15 @@ def main() -> None:
 
             if not isinstance(audio, torch.Tensor):
                 audio = torch.as_tensor(audio)
-            if audio.dim() == 1:
-                audio = audio.unsqueeze(0)
-            audio = audio.detach().cpu().float()
+            audio = audio.detach().cpu().float().numpy()
+            if audio.ndim > 1:
+                audio = audio.squeeze()
+            audio = np.asarray(audio, dtype=np.float32)
             dur = float(audio.shape[-1] / sample_rate)
             rtf = synth_time / dur if dur > 0 else float("nan")
 
-            torchaudio.save(str(hyp), audio, sample_rate)
+            # soundfile avoids torchaudio's torchcodec dependency
+            sf.write(str(hyp), audio, sample_rate)
             w.writerow(
                 {
                     "id": utt_id,
