@@ -1,0 +1,30 @@
+# Agreed TTS evaluation metrics (HealthTTS)
+
+## Metrics
+
+### 1. WER & CER (ASR loopback)
+Pipeline: **Text → TTS → synthetic audio → ASR → transcribed text**
+
+Compare ASR output to the original FLEURS text (reference).
+
+- **WER** — word error rate
+- **CER** — character error rate
+
+Default ASR scorer: `mbazaNLP/Whisper-Small-Kinyarwanda` (override in config).
+
+### 2. Latency & speed
+- **Latency** — wall-clock seconds to synthesize one utterance
+- **RTF** (real-time factor) — `synth_time_s / audio_duration_s`
+  - RTF < 1 means faster than real time
+
+### 3. Audio quality
+- **UTMOS** — automatic naturalness / speech MOS estimate (UTMOS22 Strong)
+
+## Eval set
+FLEURS Kinyarwanda **test** (cleaned):  
+`/project/community/rmwisene/datasets/fleurs_kinyarwanda/processed/eval/test.tsv`
+
+## Outputs
+Per-baseline under:
+`$BASELINES/eval_fleurs/<baseline>/test/metrics.json`
+plus per-utterance `scores.tsv`

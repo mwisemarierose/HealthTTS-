@@ -7,3 +7,5 @@ scipy
 soundfile
 huggingface_hub
 pyyaml
+jiwer
+librosa

@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import csv
 import os
+import time
 from pathlib import Path
 
 
@@ -81,7 +82,15 @@ def main() -> None:
     with meta_path.open("w", encoding="utf-8", newline="") as mf:
         w = csv.DictWriter(
             mf,
-            fieldnames=["id", "text", "ref_audio", "hyp_audio", "duration_s"],
+            fieldnames=[
+                "id",
+                "text",
+                "ref_audio",
+                "hyp_audio",
+                "duration_s",
+                "synth_time_s",
+                "rtf",
+            ],
             delimiter="\t",
         )
         w.writeheader()
@@ -92,11 +101,18 @@ def main() -> None:
             hyp = out_dir / f"{utt_id}.wav"
             inputs = tokenizer(text, return_tensors="pt")
             inputs = {k: v.to(device) for k, v in inputs.items()}
+            if device == "cuda":
+                torch.cuda.synchronize()
+            t0 = time.perf_counter()
             with torch.no_grad():
                 waveform = model(**inputs).waveform
+            if device == "cuda":
+                torch.cuda.synchronize()
+            synth_time = time.perf_counter() - t0
             audio = waveform.squeeze().detach().cpu().numpy()
             scipy.io.wavfile.write(str(hyp), rate=rate, data=audio)
             dur = float(audio.shape[-1]) / rate
+            rtf = synth_time / dur if dur > 0 else float("nan")
             w.writerow(
                 {
                     "id": utt_id,
@@ -104,10 +120,15 @@ def main() -> None:
                     "ref_audio": row.get("audio_path", ""),
                     "hyp_audio": str(hyp.resolve()),
                     "duration_s": f"{dur:.3f}",
+                    "synth_time_s": f"{synth_time:.4f}",
+                    "rtf": f"{rtf:.4f}",
                 }
             )
             if i % 10 == 0 or i == len(rows):
-                print(f"  [{i}/{len(rows)}] {utt_id} ({dur:.2f}s)")
+                print(
+                    f"  [{i}/{len(rows)}] {utt_id} "
+                    f"({dur:.2f}s audio, {synth_time:.3f}s synth, RTF={rtf:.3f})"
+                )
 
     print(f"Wrote synth → {out_dir}")
     print(f"Wrote meta  → {meta_path}")

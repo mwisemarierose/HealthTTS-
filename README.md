@@ -203,3 +203,31 @@ python scripts/eval_mms_fleurs.py --split test --limit 20
 Outputs under `$BASELINES/eval_fleurs/mms_tts_kin/test/`.
 
 **Adaptation / training** (later) uses `kinyarwanda_tts` + `kidawida_cv27`, not FLEURS.
+
+## Agreed evaluation metrics
+
+See `configs/metrics.yaml`.
+
+1. **WER & CER (ASR loopback)** — Text → TTS → audio → ASR → text  
+2. **Latency & RTF** — synth wall time and `synth_time / audio_duration`  
+3. **Audio quality** — UTMOS (automatic MOS / naturalness)
+
+### Score existing MMS FLEURS synths (GPU)
+
+```bash
+cd ~/HealthTTS && git pull
+conda activate healthtts
+pip install jiwer
+
+export BASELINES=/project/community/rmwisene/tts_baselines
+export HF_HOME=/project/community/rmwisene/.cache/huggingface
+
+bash scripts/submit_score_tts_fleurs.sh
+```
+
+Results:
+
+```text
+$BASELINES/eval_fleurs/mms_tts_kin/test/metrics.json
+$BASELINES/eval_fleurs/mms_tts_kin/test/scores.tsv
+```
