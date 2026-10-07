@@ -24,8 +24,11 @@ cd "$DEEPKIN_DIR"
 # Editable install only (setup.py has empty install_requires)
 pip install -e .
 
-# Optional light deps Flex may need beyond torch/torchaudio (already in healthtts)
-pip install -q einops 2>/dev/null || true
+# Light deps for Flex inference (NOT full requirements.txt / flash_attn)
+pip install -q \
+  "typed-argument-parser" \
+  einops \
+  Cython
 
 # Build monotonic_align if present (some TTS paths need it)
 if [[ -d monotonic_align ]]; then
