@@ -1,9 +1,10 @@
 #!/bin/bash
 # Kinya-Flex synthesis on cleaned FLEURS (GPU).
+# Runs test + dev in ONE job by default (avoids QOS max-jobs limit).
 #
 #   bash scripts/setup_deepkin.sh          # once
-#   SPLIT=test bash scripts/submit_eval_flex_fleurs.sh
-#   SPLIT=dev  bash scripts/submit_eval_flex_fleurs.sh
+#   bash scripts/submit_eval_flex_fleurs.sh
+#   SPLITS=test bash scripts/submit_eval_flex_fleurs.sh   # one split only
 
 set -euo pipefail
 
@@ -13,12 +14,13 @@ BASELINES="${BASELINES:-$PROJECT_ROOT/tts_baselines}"
 HF_HOME="${HF_HOME:-$PROJECT_ROOT/.cache/huggingface}"
 DEEPKIN_ROOT="${DEEPKIN_ROOT:-$PROJECT_ROOT/code/ac-ai-models/DeepKIN-AgAI}"
 OUT_ROOT="${OUT_ROOT:-$BASELINES/eval_fleurs/kinya_flex_tts}"
-SPLIT="${SPLIT:-test}"
+# Prefer SPLITS; fall back to SPLIT for compatibility
+SPLITS="${SPLITS:-${SPLIT:-test,dev}}"
 SPEAKER="${SPEAKER:-0}"
 LIMIT="${LIMIT:-0}"
 
 SLURM_PARTITION="${SLURM_PARTITION:-general}"
-SLURM_TIME="${SLURM_TIME:-3:00:00}"
+SLURM_TIME="${SLURM_TIME:-4:00:00}"
 SLURM_MEM="${SLURM_MEM:-64G}"
 SLURM_CPUS="${SLURM_CPUS:-8}"
 SLURM_GPUS="${SLURM_GPUS:-1}"
@@ -40,6 +42,9 @@ PY_EXTRA=""
 if [[ "$LIMIT" != "0" ]]; then
   PY_EXTRA="--limit ${LIMIT}"
 fi
+
+# Build a small runner that loops splits inside the job
+SPLITS_CSV="$SPLITS"
 
 sbatch <<EOF
 #!/bin/bash
@@ -64,11 +69,18 @@ mkdir -p "\$TMPDIR"
 
 cd "${REPO_ROOT}"
 nvidia-smi || true
-python scripts/eval_flex_fleurs.py \\
-  --split "${SPLIT}" \\
-  --speaker ${SPEAKER} \\
-  --checkpoint "${CKPT}" \\
-  --deepkin_root "${DEEPKIN_ROOT}" \\
-  --device cuda ${PY_EXTRA}
-echo DONE
+
+IFS=',' read -r -a SPLIT_ARR <<< "${SPLITS_CSV}"
+for sp in "\${SPLIT_ARR[@]}"; do
+  sp=\$(echo "\$sp" | xargs)
+  echo "===== Flex synth split=\$sp speaker=${SPEAKER} ====="
+  python scripts/eval_flex_fleurs.py \\
+    --split "\$sp" \\
+    --speaker ${SPEAKER} \\
+    --checkpoint "${CKPT}" \\
+    --deepkin_root "${DEEPKIN_ROOT}" \\
+    --device cuda ${PY_EXTRA}
+done
+
+echo DONE_ALL_SPLITS
 EOF
