@@ -24,7 +24,7 @@ audio:
 
 cleaning:
   min_chars: 1
-  max_chars: 500
+  max_chars: 2000
   min_duration_s: 0.3
   max_duration_s: 30.0
   drop_missing_audio: true

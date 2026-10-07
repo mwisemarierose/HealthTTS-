@@ -150,24 +150,52 @@ def duration_seconds(path: Path) -> float | None:
         return None
 
 
-def read_tsv(path: Path) -> list[dict]:
-    with path.open(encoding="utf-8", errors="replace", newline="") as f:
-        # detect dialect
-        sample = f.read(4096)
-        f.seek(0)
-        try:
-            dialect = csv.Sniffer().sniff(sample, delimiters="\t,")
-        except csv.Error:
-            dialect = csv.excel_tab
-        reader = csv.DictReader(f, dialect=dialect)
-        if reader.fieldnames is None:
-            return []
-        # normalize header keys
-        rows = []
-        for row in reader:
-            rows.append({(k or "").strip().lower(): (v or "").strip() for k, v in row.items()})
-        return rows
+def _looks_like_header(fields: list[str]) -> bool:
+    joined = " ".join(fields).lower()
+    return any(
+        k in joined
+        for k in ("transcription", "sentence", "path", "filename", "audio", "text")
+    ) and not any(f.endswith(".wav") for f in fields)
 
+
+def read_tsv(path: Path) -> list[dict]:
+    """Read FLEURS TSV. mbazaNLP dumps are often headerless:
+
+    - 3 cols: id, file, text
+    - 4 cols: id, file, raw_transcription, transcription
+    """
+    rows: list[dict] = []
+    with path.open(encoding="utf-8", errors="replace", newline="") as f:
+        reader = csv.reader(f, delimiter="\t")
+        all_rows = [r for r in reader if r and any(c.strip() for c in r)]
+    if not all_rows:
+        return []
+
+    start = 0
+    fieldnames: list[str] | None = None
+    if _looks_like_header(all_rows[0]):
+        fieldnames = [c.strip().lower() for c in all_rows[0]]
+        start = 1
+
+    for raw in all_rows[start:]:
+        cols = [c.strip() for c in raw]
+        if fieldnames is not None and len(cols) >= len(fieldnames):
+            row = {fieldnames[i]: cols[i] for i in range(len(fieldnames))}
+        elif len(cols) >= 4:
+            row = {
+                "id": cols[0],
+                "file": cols[1],
+                "raw_transcription": cols[2],
+                "transcription": cols[3],
+            }
+        elif len(cols) == 3:
+            row = {"id": cols[0], "file": cols[1], "text": cols[2]}
+        elif len(cols) == 2:
+            row = {"file": cols[0], "text": cols[1]}
+        else:
+            continue
+        rows.append(row)
+    return rows
 
 def clean_split(
     root: Path,
