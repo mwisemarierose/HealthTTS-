@@ -184,3 +184,22 @@ Outputs (on project):
 ```
 
 Cleaning rules: Unicode NFC, whitespace collapse, drop empty text, missing audio, and extreme durations (default 0.3–30s).
+
+## Run MMS baseline on cleaned FLEURS (eval — not training)
+
+FLEURS stays **evaluation only**. This synthesizes from cleaned `test.tsv` texts:
+
+```bash
+conda activate healthtts
+export BASELINES=/project/community/rmwisene/tts_baselines
+export HF_HOME=/project/community/rmwisene/.cache/huggingface
+
+# prefer a GPU node for full test; login CPU ok for --limit 20
+python scripts/eval_mms_fleurs.py --split test --limit 20
+# full:
+# python scripts/eval_mms_fleurs.py --split test
+```
+
+Outputs under `$BASELINES/eval_fleurs/mms_tts_kin/test/`.
+
+**Adaptation / training** (later) uses `kinyarwanda_tts` + `kidawida_cv27`, not FLEURS.
