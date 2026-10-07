@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """Score TTS synths on FLEURS with agreed metrics:
 
-1) WER & CER (ASR loopback)
+1) WER & CER (ASR loopback) — NeMo CTC from Drive (.nemo)
 2) Latency & RTF (from synthesis.tsv or --retime)
 3) UTMOS (naturalness)
 
+  # download CTC first (see scripts/download_ctc_asr.sh)
   python scripts/score_tts_fleurs.py \\
     --synth_dir $BASELINES/eval_fleurs/mms_tts_kin/test \\
-    --asr_model mbazaNLP/Whisper-Small-Kinyarwanda
-
-  # if synthesis.tsv has no timing columns, measure RTF by re-synthesizing:
-  python scripts/score_tts_fleurs.py ... --retime --tts_model_dir $BASELINES/mms_tts_kin
+    --asr_nemo /project/community/rmwisene/asr/combined-ctc-15-ep-nocl.nemo \\
+    --retime --tts_model_dir $BASELINES/mms_tts_kin
 """
 from __future__ import annotations
 
@@ -36,6 +35,31 @@ def read_tsv(path: Path) -> list[dict]:
         return list(csv.DictReader(f, delimiter="\t"))
 
 
+def load_ctc(nemo_path: Path, device: str):
+    import torch
+    from nemo.collections.asr.models import EncDecCTCModelBPE
+
+    if not nemo_path.is_file():
+        raise FileNotFoundError(
+            f"Missing CTC checkpoint: {nemo_path}\n"
+            "Download with: bash scripts/download_ctc_asr.sh"
+        )
+    map_location = "cuda" if device == "cuda" else "cpu"
+    model = EncDecCTCModelBPE.restore_from(str(nemo_path), map_location=map_location)
+    model.eval()
+    if device == "cuda" and torch.cuda.is_available():
+        model = model.cuda()
+    return model
+
+
+def ctc_transcribe(model, wav_path: Path) -> str:
+    out = model.transcribe([str(wav_path)])
+    hyp = out[0]
+    if hasattr(hyp, "text"):
+        return str(hyp.text).strip()
+    return str(hyp).strip()
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument(
@@ -44,9 +68,12 @@ def main() -> None:
         + "/eval_fleurs/mms_tts_kin/test",
     )
     p.add_argument(
-        "--asr_model",
-        default="mbazaNLP/Whisper-Small-Kinyarwanda",
-        help="HF ASR model for loopback WER/CER",
+        "--asr_nemo",
+        default=os.environ.get(
+            "CTC_NEMO",
+            "/project/community/rmwisene/asr/combined-ctc-15-ep-nocl.nemo",
+        ),
+        help="Path to Drive CTC .nemo for ASR loopback",
     )
     p.add_argument("--device", default="cuda")
     p.add_argument("--limit", type=int, default=0)
@@ -84,13 +111,11 @@ def main() -> None:
         print("CUDA not available — using CPU")
         device = "cpu"
 
-    # --- optional retime (latency / RTF) ---
-    tts_model = tts_tok = None
-    if args.retime or any(not r.get("synth_time_s") for r in rows):
-        need_retime = args.retime or all(not (r.get("synth_time_s") or "").strip() for r in rows)
-    else:
-        need_retime = False
+    need_retime = args.retime or all(
+        not (r.get("synth_time_s") or "").strip() for r in rows
+    )
 
+    tts_model = tts_tok = None
     if need_retime:
         from transformers import AutoTokenizer, VitsModel
 
@@ -99,19 +124,11 @@ def main() -> None:
         tts_tok = AutoTokenizer.from_pretrained(args.tts_model_dir)
         tts_model.eval()
 
-    # --- ASR ---
-    asr_pipe = None
+    asr_model = None
     if not args.skip_asr:
-        from transformers import pipeline
+        print(f"Loading CTC ASR: {args.asr_nemo}")
+        asr_model = load_ctc(Path(args.asr_nemo), device)
 
-        print(f"Loading ASR: {args.asr_model}")
-        asr_pipe = pipeline(
-            "automatic-speech-recognition",
-            model=args.asr_model,
-            device=0 if device == "cuda" else -1,
-        )
-
-    # --- UTMOS ---
     utmos = None
     if not args.skip_utmos:
         print("Loading UTMOS22 Strong …")
@@ -156,7 +173,6 @@ def main() -> None:
             if device == "cuda":
                 torch.cuda.synchronize()
             synth_time_f = time.perf_counter() - t0
-            # use existing audio duration for RTF (same text)
             rtf_f = synth_time_f / duration_s if duration_s > 0 else float("nan")
             synth_time = f"{synth_time_f:.4f}"
             rtf = f"{rtf_f:.4f}"
@@ -174,9 +190,8 @@ def main() -> None:
                 pass
 
         asr_text = ""
-        if asr_pipe is not None:
-            out = asr_pipe(str(hyp_audio))
-            asr_text = out["text"] if isinstance(out, dict) else str(out)
+        if asr_model is not None:
+            asr_text = ctc_transcribe(asr_model, hyp_audio)
             refs.append(normalize_for_asr(text))
             hyps.append(normalize_for_asr(asr_text))
 
@@ -186,7 +201,9 @@ def main() -> None:
             if sr != 16000:
                 import torchaudio
 
-                wav = torchaudio.functional.resample(wav.unsqueeze(0), sr, 16000).squeeze(0)
+                wav = torchaudio.functional.resample(
+                    wav.unsqueeze(0), sr, 16000
+                ).squeeze(0)
             with torch.no_grad():
                 score = utmos(wav.unsqueeze(0), 16000)
             utmos_f = float(score.item() if hasattr(score, "item") else score)
@@ -211,7 +228,7 @@ def main() -> None:
     metrics = {
         "n": len(score_rows),
         "synth_dir": str(synth_dir),
-        "asr_model": None if args.skip_asr else args.asr_model,
+        "asr_nemo": None if args.skip_asr else str(args.asr_nemo),
         "wer": None,
         "cer": None,
         "latency_s_mean": float(np.mean(latencies)) if latencies else None,

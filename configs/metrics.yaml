@@ -10,7 +10,13 @@ Compare ASR output to the original FLEURS text (reference).
 - **WER** — word error rate
 - **CER** — character error rate
 
-Default ASR scorer: `mbazaNLP/Whisper-Small-Kinyarwanda` (override in config).
+**ASR scorer (fixed):** NeMo CTC from Google Drive  
+https://drive.google.com/file/d/1gx4olc2XdlUNkNlFqXcOq1F4IbcVHyGI/view  
+
+Local path on Orchard:
+`/project/community/rmwisene/asr/combined-ctc-15-ep-nocl.nemo`
+
+Download: `bash scripts/download_ctc_asr.sh`
 
 ### 2. Latency & speed
 - **Latency** — wall-clock seconds to synthesize one utterance

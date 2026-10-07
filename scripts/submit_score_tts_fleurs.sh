@@ -1,9 +1,8 @@
 #!/bin/bash
-# Score MMS FLEURS synths: WER/CER + latency/RTF + UTMOS (GPU).
+# Score MMS FLEURS synths with Drive CTC ASR + RTF + UTMOS (GPU).
 #
+#   bash scripts/download_ctc_asr.sh   # once
 #   bash scripts/submit_score_tts_fleurs.sh
-#
-# Existing synths have no timing → uses --retime by default.
 
 set -euo pipefail
 
@@ -12,7 +11,7 @@ PROJECT_ROOT="${PROJECT_ROOT:-/project/community/rmwisene}"
 BASELINES="${BASELINES:-$PROJECT_ROOT/tts_baselines}"
 HF_HOME="${HF_HOME:-$PROJECT_ROOT/.cache/huggingface}"
 SYNTH_DIR="${SYNTH_DIR:-$BASELINES/eval_fleurs/mms_tts_kin/test}"
-ASR_MODEL="${ASR_MODEL:-mbazaNLP/Whisper-Small-Kinyarwanda}"
+CTC_NEMO="${CTC_NEMO:-$PROJECT_ROOT/asr/combined-ctc-15-ep-nocl.nemo}"
 
 SLURM_PARTITION="${SLURM_PARTITION:-general}"
 SLURM_TIME="${SLURM_TIME:-4:00:00}"
@@ -20,6 +19,12 @@ SLURM_MEM="${SLURM_MEM:-64G}"
 SLURM_CPUS="${SLURM_CPUS:-8}"
 SLURM_GPUS="${SLURM_GPUS:-1}"
 SLURM_JOB_NAME="${SLURM_JOB_NAME:-tts-score-fleurs}"
+
+if [[ ! -f "$CTC_NEMO" ]]; then
+  echo "Missing CTC: $CTC_NEMO"
+  echo "Run: bash scripts/download_ctc_asr.sh"
+  exit 1
+fi
 
 mkdir -p "$SYNTH_DIR" "$HF_HOME"
 
@@ -39,6 +44,7 @@ conda activate healthtts
 
 export BASELINES="${BASELINES}"
 export HF_HOME="${HF_HOME}"
+export CTC_NEMO="${CTC_NEMO}"
 export HUGGINGFACE_HUB_CACHE="${HF_HOME}/hub"
 export TRANSFORMERS_CACHE="${HF_HOME}"
 export TORCH_HOME="${PROJECT_ROOT}/.cache/torch"
@@ -50,7 +56,7 @@ nvidia-smi || true
 
 python scripts/score_tts_fleurs.py \\
   --synth_dir "${SYNTH_DIR}" \\
-  --asr_model "${ASR_MODEL}" \\
+  --asr_nemo "${CTC_NEMO}" \\
   --tts_model_dir "${BASELINES}/mms_tts_kin" \\
   --retime \\
   --device cuda

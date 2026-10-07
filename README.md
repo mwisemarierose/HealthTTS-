@@ -208,20 +208,27 @@ Outputs under `$BASELINES/eval_fleurs/mms_tts_kin/test/`.
 
 See `configs/metrics.yaml`.
 
-1. **WER & CER (ASR loopback)** — Text → TTS → audio → ASR → text  
+1. **WER & CER (ASR loopback)** — Text → TTS → audio → **Drive CTC** → text  
 2. **Latency & RTF** — synth wall time and `synth_time / audio_duration`  
 3. **Audio quality** — UTMOS (automatic MOS / naturalness)
+
+ASR scorer: NeMo CTC from Drive  
+https://drive.google.com/file/d/1gx4olc2XdlUNkNlFqXcOq1F4IbcVHyGI/view  
+→ `/project/community/rmwisene/asr/combined-ctc-15-ep-nocl.nemo`
 
 ### Score existing MMS FLEURS synths (GPU)
 
 ```bash
 cd ~/HealthTTS && git pull
 conda activate healthtts
-pip install jiwer
+pip install jiwer gdown
 
+# 1) pull CTC from Drive (once)
+bash scripts/download_ctc_asr.sh
+
+# 2) score: WER/CER (CTC) + RTF + UTMOS
 export BASELINES=/project/community/rmwisene/tts_baselines
 export HF_HOME=/project/community/rmwisene/.cache/huggingface
-
 bash scripts/submit_score_tts_fleurs.sh
 ```
 
