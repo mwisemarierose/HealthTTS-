@@ -224,11 +224,9 @@ conda activate healthtts
 pip install jiwer
 
 # 1) pull CTC from Drive with rclone (once)
-# find path: rclone ls Gdrive-Okeyo: | grep -i nemo
-export RCLONE_CTC_SRC='Gdrive-Okeyo:ASR Summer 2026/combined-ctc-15-ep-nocl.nemo'
 bash scripts/download_ctc_asr.sh
-# or by file id:
-# RCLONE_REMOTE=Gdrive-Okeyo bash scripts/download_ctc_asr.sh
+# default src:
+#   Gdrive-Okeyo:ASR Summer 2026/models/no-curriculum/combined-ctc-15-ep-nocl.nemo
 
 # 2) score: WER/CER (CTC) + RTF + UTMOS
 export BASELINES=/project/community/rmwisene/tts_baselines
