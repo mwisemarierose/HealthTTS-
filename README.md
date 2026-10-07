@@ -221,10 +221,14 @@ https://drive.google.com/file/d/1gx4olc2XdlUNkNlFqXcOq1F4IbcVHyGI/view
 ```bash
 cd ~/HealthTTS && git pull
 conda activate healthtts
-pip install jiwer gdown
+pip install jiwer
 
-# 1) pull CTC from Drive (once)
+# 1) pull CTC from Drive with rclone (once)
+# find path: rclone ls Gdrive-Okeyo: | grep -i nemo
+export RCLONE_CTC_SRC='Gdrive-Okeyo:ASR Summer 2026/combined-ctc-15-ep-nocl.nemo'
 bash scripts/download_ctc_asr.sh
+# or by file id:
+# RCLONE_REMOTE=Gdrive-Okeyo bash scripts/download_ctc_asr.sh
 
 # 2) score: WER/CER (CTC) + RTF + UTMOS
 export BASELINES=/project/community/rmwisene/tts_baselines
