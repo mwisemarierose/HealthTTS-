@@ -19,6 +19,7 @@ SLURM_MEM="${SLURM_MEM:-64G}"
 SLURM_CPUS="${SLURM_CPUS:-8}"
 SLURM_GPUS="${SLURM_GPUS:-1}"
 SLURM_JOB_NAME="${SLURM_JOB_NAME:-tts-score-fleurs}"
+RETIME="${RETIME:-1}"  # set RETIME=0 if synthesis.tsv already has timing
 
 if [[ ! -f "$CTC_NEMO" ]]; then
   echo "Missing CTC: $CTC_NEMO"
@@ -58,7 +59,7 @@ python scripts/score_tts_fleurs.py \\
   --synth_dir "${SYNTH_DIR}" \\
   --asr_nemo "${CTC_NEMO}" \\
   --tts_model_dir "${BASELINES}/mms_tts_kin" \\
-  --retime \\
+  $( [[ "${RETIME}" == "1" ]] && echo --retime ) \\
   --device cuda
 
 echo DONE

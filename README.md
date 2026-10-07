@@ -240,3 +240,26 @@ Results:
 $BASELINES/eval_fleurs/mms_tts_kin/test/metrics.json
 $BASELINES/eval_fleurs/mms_tts_kin/test/scores.tsv
 ```
+
+## Kinya-Flex baseline on FLEURS
+
+Weights: `$BASELINES/kinya_flex_tts/kinya_flex_tts_base_trained.pt`  
+Code: DeepKIN-AgAI (install once).
+
+```bash
+# 1) install DeepKIN into healthtts (once)
+bash scripts/setup_deepkin.sh
+
+# 2) synthesize (GPU) — test then dev
+SPLIT=test SPEAKER=0 bash scripts/submit_eval_flex_fleurs.sh
+# or on an interactive GPU node:
+# python scripts/eval_flex_fleurs.py --split test --speaker 0 --device cuda
+
+SPLIT=dev SPEAKER=0 bash scripts/submit_eval_flex_fleurs.sh
+
+# 3) score with Drive CTC + UTMOS (timing already in synthesis.tsv → no --retime needed)
+SYNTH_DIR=$BASELINES/eval_fleurs/kinya_flex_tts/test \
+  bash scripts/submit_score_tts_fleurs.sh
+```
+
+Speakers: `0` Female1, `1` Female2, `2` Male (24 kHz). Default eval speaker = `0`.
