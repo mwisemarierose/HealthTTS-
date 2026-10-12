@@ -122,28 +122,6 @@ def detect_text_column(fieldnames: list[str] | None) -> str | None:
     return None
 
 
-def _score_text_column(rows: list[dict], col: str) -> float:
-    """Higher = more likely a transcript column (long alphabetic strings)."""
-    vals = [(r.get(col) or "").strip() for r in rows]
-    vals = [v for v in vals if v]
-    if not vals:
-        return -1.0
-    alpha_fracs = []
-    lens = []
-    for v in vals:
-        n = len(v)
-        lens.append(n)
-        alpha = sum(1 for ch in v if unicodedata.category(ch).startswith("L") or ch.isspace())
-        alpha_fracs.append(alpha / max(n, 1))
-    # Prefer longer, mostly-alphabetic fields; penalize path-like columns
-    pathish = sum(1 for v in vals if "/" in v or v.endswith((".wav", ".mp3", ".flac")))
-    if pathish >= max(1, len(vals) // 2):
-        return -1.0
-    return (sum(alpha_fracs) / len(alpha_fracs)) * 10.0 + min(
-        sum(lens) / len(lens), 200.0
-    ) / 20.0
-
-
 def _sniff_delimiter(sample: str) -> list[str]:
     try:
         dialect = csv.Sniffer().sniff(sample, delimiters=",\t|;")
@@ -152,17 +130,37 @@ def _sniff_delimiter(sample: str) -> list[str]:
         return [",", "\t", ";", "|"]
 
 
-def read_table_texts(path: Path, limit: int = 0) -> tuple[list[str], str]:
-    """Return (normalized texts, detected column name)."""
-    raw = path.read_bytes()
-    # utf-8-sig strips BOM
-    try:
-        text = raw.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        text = raw.decode("utf-8", errors="replace")
+def is_non_transcript_table(path: Path) -> bool:
+    """Skip duration / numeric metadata tables that are not transcripts."""
+    n = path.name.lower()
+    # Exact / common Common Voice non-transcript tables
+    blocked_names = {
+        "clip_durations.tsv",
+        "clip_durations.csv",
+        "sizes.txt",
+    }
+    if n in blocked_names:
+        return True
+    blocked_substrings = (
+        "clip_duration",
+        "durations",
+        "duration_ms",
+        "file_size",
+    )
+    return any(s in n for s in blocked_substrings)
 
-    sample = text[:8192]
-    tried_delims = []
+
+def read_table_texts(path: Path, limit: int = 0) -> tuple[list[str], str]:
+    """Return (normalized texts, detected column name).
+
+    Only uses columns whose names look like transcript/sentence text.
+    Never falls back to numeric columns (e.g. duration).
+    """
+    if is_non_transcript_table(path):
+        raise ValueError(f"Non-transcript table excluded: {path.name}")
+
+    sample = path.read_text(encoding="utf-8-sig", errors="replace")[:8192]
+    tried_delims: list[str] = []
     last_fields: list[str] = []
 
     for delim in _sniff_delimiter(sample):
@@ -172,36 +170,31 @@ def read_table_texts(path: Path, limit: int = 0) -> tuple[list[str], str]:
         with path.open(encoding="utf-8-sig", newline="", errors="replace") as f:
             reader = csv.DictReader(f, delimiter=delim)
             fields = list(reader.fieldnames or [])
-            # If one field contains many commas, wrong delimiter
             if len(fields) <= 1 and delim != ",":
                 continue
             last_fields = [((x or "").lstrip("\ufeff").strip()) for x in fields]
             col = detect_text_column(fields)
-
-            # Fallback: score columns on a sample of rows
-            sample_rows: list[dict] = []
-            for i, row in enumerate(reader):
-                sample_rows.append(row)
-                if i >= 49:
-                    break
-            if col is None and sample_rows and fields:
-                scored = sorted(
-                    (( _score_text_column(sample_rows, c), c) for c in fields if c),
-                    reverse=True,
-                )
-                if scored and scored[0][0] > 0:
-                    col = scored[0][1]
-
+            # Do NOT score-pick numeric columns — require a transcript-like name
             if col is None:
                 continue
+            col_l = (col or "").lower()
+            if any(
+                bad in col_l
+                for bad in ("duration", "size", "bytes", "clip", "path", "filename", "age", "votes")
+            ) and not any(
+                good in col_l for good in ("sentence", "transcript", "text", "utterance", "prompt")
+            ):
+                continue
 
-            texts: list[str] = []
-            # re-open to read all rows with chosen col
         with path.open(encoding="utf-8-sig", newline="", errors="replace") as f:
             reader = csv.DictReader(f, delimiter=delim)
+            texts: list[str] = []
             for row in reader:
                 raw_cell = (row.get(col) or "").strip()
                 if not raw_cell:
+                    continue
+                # Reject rows that are purely numeric (not transcripts)
+                if re.fullmatch(r"[0-9]+([.,][0-9]+)?", raw_cell):
                     continue
                 texts.append(normalize_text(raw_cell))
                 if limit and len(texts) >= limit:
@@ -210,7 +203,7 @@ def read_table_texts(path: Path, limit: int = 0) -> tuple[list[str], str]:
                 return texts, f"{path.name}:{col} (delim={repr(delim)})"
 
     raise ValueError(
-        f"No transcript/text column found in {path}. "
+        f"No transcript/sentence column found in {path}. "
         f"Columns seen: {last_fields or '(none)'}. "
         f"Tried delimiters: {tried_delims}"
     )
@@ -227,19 +220,16 @@ def collect_dav_texts(dav_dir: Path, limit: int = 0) -> tuple[list[str], list[st
 
     def rank(p: Path) -> tuple:
         n = p.name.lower()
-        # prefer Common Voice train / validated
         score = 100
         if "train" in n:
             score = 0
         elif "validated" in n:
             score = 1
-        elif n in ("clip_durations.tsv",):
-            score = 500
-        elif any(x in n for x in ("invalidated", "other", "reported", "duration")):
-            score = 400
         elif "dev" in n or "test" in n:
-            score = 50  # still usable if train missing; not FLEURS
-        if "fleurs" in str(p).lower():
+            score = 50
+        elif any(x in n for x in ("invalidated", "other", "reported")):
+            score = 80
+        if "fleurs" in str(p).lower() or is_non_transcript_table(p):
             score = 10_000
         return (score, str(p))
 
@@ -251,6 +241,9 @@ def collect_dav_texts(dav_dir: Path, limit: int = 0) -> tuple[list[str], list[st
     for path in candidates:
         if "fleurs" in str(path).lower():
             notes.append(f"SKIP (FLEURS excluded): {path}")
+            continue
+        if is_non_transcript_table(path):
+            notes.append(f"SKIP (non-transcript table): {path.name}")
             continue
         try:
             part, src = read_table_texts(path, limit=0)
@@ -267,11 +260,6 @@ def collect_dav_texts(dav_dir: Path, limit: int = 0) -> tuple[list[str], list[st
                     notes.append(f"used {src} (+{added}); hit --limit")
                     return texts, notes
         notes.append(f"used {src} (+{added} unique)")
-        # If we already got a solid train/validated file, stop early
-        name = path.name.lower()
-        if added > 0 and ("train" in name or "validated" in name) and len(texts) >= 100:
-            # continue to merge other train-like files but don't require all
-            pass
 
     if not texts:
         raise RuntimeError(
@@ -338,6 +326,24 @@ def character_summary(kin_texts: list[str], dav_texts: list[str]) -> dict:
 # ---------------------------------------------------------------------------
 # MMS frontend
 # ---------------------------------------------------------------------------
+def mms_frontend_text(tok, text: str) -> str:
+    """Apply the tokenizer's own frontend normalize when available.
+
+    VITS/MMS may strip punctuation / change casing. Characters removed by that
+    step are intentional frontend behavior, not 'unsupported' vocabulary gaps.
+    We do NOT require decode(encode(text)) == text.
+    """
+    # Prefer the model's normalize_text if present
+    if hasattr(tok, "normalize_text") and callable(tok.normalize_text):
+        try:
+            # Only apply when tokenizer is configured to normalize
+            if getattr(tok, "normalize", True):
+                return tok.normalize_text(text)
+        except Exception:
+            pass
+    return text
+
+
 def analyze_mms(mms_dir: Path, dav_texts: list[str]) -> dict:
     from transformers import AutoTokenizer
 
@@ -351,7 +357,7 @@ def analyze_mms(mms_dir: Path, dav_texts: list[str]) -> dict:
     tok = AutoTokenizer.from_pretrained(str(mms_dir))
     vocab = tok.get_vocab()
     unk_id = tok.unk_token_id
-    # single-character vocab entries (frontend alphabet)
+    # Actual tokenizer vocabulary symbols (char-level MMS/VITS)
     vocab_chars = {s for s in vocab if isinstance(s, str) and len(s) == 1}
 
     ok_sentences = 0
@@ -362,13 +368,18 @@ def analyze_mms(mms_dir: Path, dav_texts: list[str]) -> dict:
     failures: list[dict] = []
 
     for text in dav_texts:
+        # Map through the real frontend first (may drop punctuation)
+        frontend = mms_frontend_text(tok, text)
+
         try:
             enc = tok(text, return_tensors=None)
             ids = list(enc["input_ids"])
         except Exception as e:
             failed_sentences += 1
-            for ch in text:
-                if unicodedata.category(ch).startswith("L") and ch not in vocab_chars:
+            for ch in frontend:
+                if ch.isspace():
+                    continue
+                if ch not in vocab_chars:
                     unsupported_chars[ch] += 1
             if len(failures) < 10:
                 failures.append(
@@ -382,36 +393,28 @@ def analyze_mms(mms_dir: Path, dav_texts: list[str]) -> dict:
             n_unk = sum(1 for i in ids if i == unk_id)
         unknown_token_count += n_unk
 
-        # chars in input missing from tokenizer char vocab
+        # Unsupported = characters that remain after frontend normalize
+        # but are not in the tokenizer vocabulary (cannot be mapped).
         missing_here = []
-        for ch in text:
+        for ch in frontend:
             if ch.isspace():
                 continue
             if ch not in vocab_chars:
-                # MMS VITS often lowercases inside tokenizer; already normalized lower
                 unsupported_chars[ch] += 1
                 missing_here.append(ch)
 
-        # round-trip drop check (best-effort)
-        try:
-            decoded = normalize_text(tok.decode(ids, skip_special_tokens=True))
-            # blank-separated VITS decode may insert spaces between chars
-            dec_compact = re.sub(r"\s+", "", decoded)
-            src_compact = re.sub(r"\s+", "", text)
-            dropped = sorted(set(src_compact) - set(dec_compact))
-        except Exception:
-            dropped = []
-
-        bad = bool(n_unk or missing_here or dropped)
+        # Failure criteria: encode exception (above), UNK ids, or unmapped chars.
+        # NOT decode(encode(text)) round-trip identity.
+        bad = bool(n_unk or missing_here)
         if bad:
             failed_sentences += 1
             if len(failures) < 10:
                 failures.append(
                     {
                         "text": text[:160],
+                        "frontend_text": frontend[:160],
                         "n_unk": n_unk,
-                        "missing_chars": "".join(sorted(set(missing_here)))[:40],
-                        "dropped_vs_decode": "".join(dropped)[:40],
+                        "unmapped_chars": "".join(sorted(set(missing_here)))[:40],
                     }
                 )
         else:
@@ -438,6 +441,11 @@ def analyze_mms(mms_dir: Path, dav_texts: list[str]) -> dict:
         "example_failures": failures,
         "compatibility": interpret(
             sentence_cov, token_cov, len(unsupported), failed_sentences, n
+        ),
+        "note": (
+            "Compatibility uses unsupported frontend chars, UNK token ids, and "
+            "encode exceptions only. decode(encode(text)) round-trip mismatches "
+            "are ignored (VITS normalize is not required to be lossless)."
         ),
     }
 
@@ -820,7 +828,10 @@ def write_report(
         "",
         "2) MMS-TTS-Kin frontend",
         "----------------------",
+        "  Criteria: unsupported chars after tokenizer normalize, UNK ids, encode exceptions.",
+        "  NOT used: decode(encode(text)) round-trip identity.",
     ]
+
     lines.extend(_format_model_block(mms))
     lines += ["", "3) Kinya-Flex-TTS frontend", "--------------------------"]
     lines.extend(_format_model_block(flex))
