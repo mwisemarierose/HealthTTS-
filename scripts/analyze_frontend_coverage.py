@@ -57,9 +57,23 @@ TEXT_KEYS = (
     "sentence",
     "transcript",
     "transcription",
+    "transcriptions",
     "normalized_text",
     "raw_transcription",
     "raw_text",
+    "content",
+    "utterance",
+    "utterance_text",
+    "orthography",
+    "phrase",
+    "written",
+    "prompts",
+    "prompt",
+    "message",
+    "caption",
+    "kinyarwanda",
+    "rw",
+    "kin",
 )
 
 
