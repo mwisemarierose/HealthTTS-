@@ -3,6 +3,11 @@
 
 FLEURS is evaluation-only and is NOT used here.
 
+By default Kidaw’ida text comes from the FROZEN cleaned corpus:
+  /project/community/rmwisene/tts_data_cleaning/kidawida_cleaned_transcripts.csv
+(use --use_raw_dav to read kidawida_cv27 instead).
+
+  python scripts/freeze_cleaned_kidawida.py   # once
   python scripts/analyze_frontend_coverage.py
 
 Outputs (only):
@@ -43,6 +48,13 @@ OUT_DIR = Path(
 KIN_CSV = DATA / "kinyarwanda_tts" / "tts-dataset.csv"
 KIN_DIR = DATA / "kinyarwanda_tts"
 DAV_DIR = DATA / "kidawida_cv27"
+# Prefer frozen cleaned transcripts for frontend checks (source corpus untouched)
+DAV_CLEANED_CSV = Path(
+    os.environ.get(
+        "DAV_CLEANED_CSV",
+        "/project/community/rmwisene/tts_data_cleaning/kidawida_cleaned_transcripts.csv",
+    )
+)
 MMS_DIR = BASELINES / "mms_tts_kin"
 FLEX_CKPT = BASELINES / "kinya_flex_tts" / "kinya_flex_tts_base_trained.pt"
 DEEPKIN_ROOT = Path(
@@ -207,6 +219,47 @@ def read_table_texts(path: Path, limit: int = 0) -> tuple[list[str], str]:
         f"Columns seen: {last_fields or '(none)'}. "
         f"Tried delimiters: {tried_delims}"
     )
+
+
+def collect_dav_cleaned_texts(
+    cleaned_csv: Path, limit: int = 0
+) -> tuple[list[str], list[str]]:
+    """Load frozen cleaned Kidaw’ida texts (cleaned_text column).
+
+    Keeps all rows including flagged q/x/ä/~ sentences — does not delete them.
+    """
+    if not cleaned_csv.is_file():
+        raise FileNotFoundError(
+            f"Missing cleaned Kidaw’ida CSV: {cleaned_csv}\n"
+            "Run: python scripts/audit_clean_kidawida_transcripts.py"
+        )
+    texts: list[str] = []
+    notes = [
+        f"FROZEN cleaned corpus: {cleaned_csv}",
+        "Using column cleaned_text; flagged q/x/ä/~ sentences retained for later review.",
+        "Original kidawida_cv27 source files were not modified.",
+    ]
+    n_flagged = 0
+    with cleaned_csv.open(encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        if not reader.fieldnames or "cleaned_text" not in reader.fieldnames:
+            raise ValueError(
+                f"{cleaned_csv} must have a cleaned_text column; "
+                f"got {reader.fieldnames}"
+            )
+        for row in reader:
+            t = normalize_text(row.get("cleaned_text") or "")
+            if not t:
+                continue
+            if (row.get("flagged") or "").strip().lower() in {"yes", "true", "1"}:
+                n_flagged += 1
+            texts.append(t)
+            if limit and len(texts) >= limit:
+                break
+    notes.append(f"rows_loaded={len(texts)} flagged_rows_included={n_flagged}")
+    if not texts:
+        raise RuntimeError(f"No cleaned_text rows in {cleaned_csv}")
+    return texts, notes
 
 
 def collect_dav_texts(dav_dir: Path, limit: int = 0) -> tuple[list[str], list[str]]:
@@ -1193,6 +1246,18 @@ def main() -> None:
     ap.add_argument("--kin_csv", type=Path, default=KIN_CSV)
     ap.add_argument("--kin_dir", type=Path, default=KIN_DIR)
     ap.add_argument("--dav_dir", type=Path, default=DAV_DIR)
+    ap.add_argument(
+        "--dav_cleaned_csv",
+        type=Path,
+        default=DAV_CLEANED_CSV,
+        help="Frozen cleaned Kidaw’ida transcripts CSV (default). "
+        "Use --use_raw_dav to read kidawida_cv27 instead.",
+    )
+    ap.add_argument(
+        "--use_raw_dav",
+        action="store_true",
+        help="Load raw kidawida_cv27 instead of the frozen cleaned CSV",
+    )
     ap.add_argument("--mms_dir", type=Path, default=MMS_DIR)
     ap.add_argument("--deepkin_root", type=Path, default=DEEPKIN_ROOT)
     ap.add_argument("--out_dir", type=Path, default=OUT_DIR)
@@ -1205,9 +1270,17 @@ def main() -> None:
     kin_texts, kin_src = collect_kin_texts(args.kin_csv, args.kin_dir, args.limit)
     print(f"  n={len(kin_texts)} from {kin_src}")
 
-    print("Loading Kidaw’ida training texts…")
-    dav_texts, dav_notes = collect_dav_texts(args.dav_dir, args.limit)
+    if args.use_raw_dav:
+        print("Loading Kidaw’ida RAW training texts…")
+        dav_texts, dav_notes = collect_dav_texts(args.dav_dir, args.limit)
+    else:
+        print("Loading Kidaw’ida FROZEN cleaned transcripts…")
+        dav_texts, dav_notes = collect_dav_cleaned_texts(
+            args.dav_cleaned_csv, args.limit
+        )
     print(f"  n={len(dav_texts)}")
+    for note in dav_notes[:5]:
+        print(f"  · {note}")
 
     char_sum = character_summary(kin_texts, dav_texts)
 
