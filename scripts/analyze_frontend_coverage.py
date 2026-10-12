@@ -609,11 +609,10 @@ def analyze_mms(
             ids = list(enc["input_ids"])
         except Exception as e:
             failed_sentences += 1
-            # true gaps among surviving frontend chars
             for ch in frontend:
-                if ch.isspace() or _is_expected_punct(ch):
+                if ch.isspace() or _is_expected_punct(ch) or ch in kin_charset:
                     continue
-                if ch not in mms_supported and ch not in vocab_chars:
+                if ch not in vocab_chars and ch not in mms_supported:
                     if _is_alpha(ch):
                         unsupported_alpha[ch] += 1
                     else:
@@ -628,42 +627,33 @@ def analyze_mms(
             n_unk = sum(1 for i in ids if i == unk_id)
         unknown_token_count += n_unk
 
-        # True unsupported = remains AFTER Kin-equivalent MMS normalize,
-        # is not expected punctuation, and cannot be mapped by vocab /
-        # is a Dav language char absent from Kin+MMS supported alphabet.
+        # True unsupported language/special chars ONLY:
+        #   - survive (or are checked on) frontend text after MMS normalize
+        #   - are NOT ordinary punctuation (never a failure by themselves)
+        #   - are absent from Kinyarwanda training charset AND MMS vocab
+        # Chars already in Kin (e.g. q, . , ? !) never auto-fail.
+        # Punctuation removed by normalize is expected — not a failure.
         missing_here = []
         for ch in frontend:
             if ch.isspace():
                 continue
-            # Punctuation still present after normalize: only fail if not in vocab
-            # AND not an expected punct that Kin also uses (q/. /, etc. are fine if mapped)
+            # NEVER treat expected punctuation as unsupported / sentence failure
             if _is_expected_punct(ch):
-                # If Kin training already has this punct and/or vocab maps it → OK
-                if ch in kin_charset or ch in vocab_chars:
-                    continue
-                # rare punct not in Kin and not in vocab → special unsupported
-                if ch not in vocab_chars:
-                    unsupported_special[ch] += 1
-                    missing_here.append(ch)
                 continue
-
-            # Alphabetic / other symbols: must be in MMS vocab to be representable
-            in_vocab = ch in vocab_chars
-            in_kin = ch in kin_charset
-            # Characters already in Kin corpus (e.g. q) are not Dav-novel failures
-            # if the tokenizer can map them.
-            if in_vocab:
+            # Already attested in Kin training → not a Dav-novel frontend gap
+            if ch in kin_charset:
                 continue
-            # Not in vocab → true unsupported (language gap)
+            # Mapped by MMS vocab → representable
+            if ch in vocab_chars or ch in mms_supported:
+                continue
+            # Dav-novel and unmapped → true unsupported
             if _is_alpha(ch):
                 unsupported_alpha[ch] += 1
             else:
                 unsupported_special[ch] += 1
             missing_here.append(ch)
-            # Dav-novel vs Kin is recorded via focus / char summary; still a fail if unmapped
 
-        # Fail only on UNK ids, encode errors (above), or true unmapped non-punct chars.
-        # Do NOT fail because punctuation disappeared during normalize.
+        # Fail only on UNK ids, encode errors (above), or true Dav-novel unmapped chars.
         bad = bool(n_unk or missing_here)
         if bad:
             failed_sentences += 1
@@ -718,11 +708,11 @@ def analyze_mms(
             sentence_cov, token_cov, len(unsupported_all), failed_sentences, n
         ),
         "note": (
-            "Punctuation intentionally removed by MMS/VITS normalize "
-            f"({''.join(sorted(MMS_EXPECTED_PUNCT))}) is NOT treated as unsupported. "
-            "Kin training already includes . , ? ! \" : ; and q — those do not auto-fail. "
-            "Compatibility focuses on true unmapped chars after the same normalize, "
-            "UNK ids, and encode exceptions. Special inspection: x, ä, ~. "
+            "Ordinary punctuation (. , ? ! \" : ; and Unicode variants) is NEVER a "
+            "sentence failure — whether stripped by normalize or left in the string. "
+            "Chars already in the Kinyarwanda training corpus (including q) do not auto-fail. "
+            "Failures = encode exceptions, UNK ids, or Dav-novel chars absent from "
+            "Kin charset and MMS vocab (inspect x, ä, ~). "
             "decode(encode(text)) round-trip is not required."
         ),
     }
