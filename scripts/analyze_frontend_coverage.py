@@ -269,15 +269,80 @@ def collect_dav_texts(dav_dir: Path, limit: int = 0) -> tuple[list[str], list[st
     return texts, notes
 
 
+def read_kin_tts_dataset(path: Path, limit: int = 0) -> tuple[list[str], str]:
+    """Parse mbazaNLP-style kinyarwanda tts-dataset.csv.
+
+    Observed formats (no reliable header):
+      TTS_1_2 "ntivuga ko nehemiya ..."
+      TTS_1_2,ntivuga ko ...
+      TTS_1_2,"ntivuga ko ..."
+    """
+    # First try normal table parse (if someone fixed the CSV later)
+    try:
+        return read_table_texts(path, limit=limit)
+    except ValueError:
+        pass
+
+    texts: list[str] = []
+    # id + quoted transcript
+    pat_quoted = re.compile(r'^\s*\S+\s+"(.*)"\s*$')
+    # id,transcript  OR  id,"transcript"
+    pat_csv = re.compile(r'^\s*([^,]+),\s*"(.*)"\s*$|^\s*([^,]+),\s*(.*)\s*$')
+
+    with path.open(encoding="utf-8-sig", errors="replace") as f:
+        for line_no, line in enumerate(f, 1):
+            line = line.strip()
+            if not line:
+                continue
+            # Skip license-like / header-ish lines with no spoken text
+            low = line.lower()
+            if low.startswith("license") or low.startswith("http"):
+                continue
+
+            text = None
+            m = pat_quoted.match(line)
+            if m:
+                text = m.group(1)
+            else:
+                m = pat_csv.match(line)
+                if m:
+                    text = m.group(2) if m.group(2) is not None else m.group(4)
+
+            if text is None:
+                # Last resort: if line has a long alphabetic span after first token
+                parts = line.split(None, 1)
+                if len(parts) == 2 and sum(
+                    unicodedata.category(c).startswith("L") for c in parts[1]
+                ) >= 8:
+                    text = parts[1].strip().strip('"')
+
+            if not text:
+                continue
+            # Ignore pure ids / numeric
+            if re.fullmatch(r"[0-9]+([.,][0-9]+)?", text.strip()):
+                continue
+            texts.append(normalize_text(text))
+            if limit and len(texts) >= limit:
+                break
+
+    if not texts:
+        raise ValueError(
+            f"Could not parse Kinyarwanda transcripts from {path}. "
+            "Expected lines like: TTS_1_2 \"...transcript...\""
+        )
+    return texts, f"{path.name}:line-parser (id + transcript)"
+
+
 def collect_kin_texts(kin_csv: Path, kin_dir: Path, limit: int = 0) -> tuple[list[str], str]:
     if kin_csv.is_file():
-        texts, src = read_table_texts(kin_csv, limit=limit)
-        return texts, src
+        return read_kin_tts_dataset(kin_csv, limit=limit)
     # fallback: search kin_dir (still not FLEURS)
     for path in sorted(kin_dir.rglob("*.csv")) + sorted(kin_dir.rglob("*.tsv")):
         if "fleurs" in str(path).lower():
             continue
         try:
+            if path.name.lower() == "tts-dataset.csv":
+                return read_kin_tts_dataset(path, limit=limit)
             return read_table_texts(path, limit=limit)
         except Exception:
             continue
