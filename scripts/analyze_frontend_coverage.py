@@ -100,37 +100,120 @@ def alphabetic_chars(texts: list[str]) -> set[str]:
 def detect_text_column(fieldnames: list[str] | None) -> str | None:
     if not fieldnames:
         return None
-    lower = {f.lower().strip(): f for f in fieldnames if f}
+    # strip BOM / whitespace on header names
+    cleaned = [(f or "").lstrip("\ufeff").strip() for f in fieldnames]
+    lower = {f.lower(): orig for f, orig in zip(cleaned, fieldnames) if f}
     for key in TEXT_KEYS:
         if key in lower:
             return lower[key]
     # fuzzy: any column containing these substrings
-    for cand in ("sentence", "transcript", "text"):
+    for cand in (
+        "sentence",
+        "transcript",
+        "transcription",
+        "utterance",
+        "prompt",
+        "content",
+        "text",
+    ):
         for low, orig in lower.items():
             if cand in low:
                 return orig
     return None
 
 
+def _score_text_column(rows: list[dict], col: str) -> float:
+    """Higher = more likely a transcript column (long alphabetic strings)."""
+    vals = [(r.get(col) or "").strip() for r in rows]
+    vals = [v for v in vals if v]
+    if not vals:
+        return -1.0
+    alpha_fracs = []
+    lens = []
+    for v in vals:
+        n = len(v)
+        lens.append(n)
+        alpha = sum(1 for ch in v if unicodedata.category(ch).startswith("L") or ch.isspace())
+        alpha_fracs.append(alpha / max(n, 1))
+    # Prefer longer, mostly-alphabetic fields; penalize path-like columns
+    pathish = sum(1 for v in vals if "/" in v or v.endswith((".wav", ".mp3", ".flac")))
+    if pathish >= max(1, len(vals) // 2):
+        return -1.0
+    return (sum(alpha_fracs) / len(alpha_fracs)) * 10.0 + min(
+        sum(lens) / len(lens), 200.0
+    ) / 20.0
+
+
+def _sniff_delimiter(sample: str) -> list[str]:
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=",\t|;")
+        return [dialect.delimiter, ",", "\t", ";", "|"]
+    except Exception:
+        return [",", "\t", ";", "|"]
+
+
 def read_table_texts(path: Path, limit: int = 0) -> tuple[list[str], str]:
     """Return (normalized texts, detected column name)."""
-    for delim in ("\t", ","):
-        with path.open(encoding="utf-8", newline="", errors="replace") as f:
+    raw = path.read_bytes()
+    # utf-8-sig strips BOM
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = raw.decode("utf-8", errors="replace")
+
+    sample = text[:8192]
+    tried_delims = []
+    last_fields: list[str] = []
+
+    for delim in _sniff_delimiter(sample):
+        if delim in tried_delims:
+            continue
+        tried_delims.append(delim)
+        with path.open(encoding="utf-8-sig", newline="", errors="replace") as f:
             reader = csv.DictReader(f, delimiter=delim)
-            col = detect_text_column(list(reader.fieldnames or []))
+            fields = list(reader.fieldnames or [])
+            # If one field contains many commas, wrong delimiter
+            if len(fields) <= 1 and delim != ",":
+                continue
+            last_fields = [((x or "").lstrip("\ufeff").strip()) for x in fields]
+            col = detect_text_column(fields)
+
+            # Fallback: score columns on a sample of rows
+            sample_rows: list[dict] = []
+            for i, row in enumerate(reader):
+                sample_rows.append(row)
+                if i >= 49:
+                    break
+            if col is None and sample_rows and fields:
+                scored = sorted(
+                    (( _score_text_column(sample_rows, c), c) for c in fields if c),
+                    reverse=True,
+                )
+                if scored and scored[0][0] > 0:
+                    col = scored[0][1]
+
             if col is None:
                 continue
+
             texts: list[str] = []
+            # re-open to read all rows with chosen col
+        with path.open(encoding="utf-8-sig", newline="", errors="replace") as f:
+            reader = csv.DictReader(f, delimiter=delim)
             for row in reader:
-                raw = (row.get(col) or "").strip()
-                if not raw:
+                raw_cell = (row.get(col) or "").strip()
+                if not raw_cell:
                     continue
-                texts.append(normalize_text(raw))
+                texts.append(normalize_text(raw_cell))
                 if limit and len(texts) >= limit:
                     break
             if texts:
                 return texts, f"{path.name}:{col} (delim={repr(delim)})"
-    raise ValueError(f"No transcript/text column found in {path}")
+
+    raise ValueError(
+        f"No transcript/text column found in {path}. "
+        f"Columns seen: {last_fields or '(none)'}. "
+        f"Tried delimiters: {tried_delims}"
+    )
 
 
 def collect_dav_texts(dav_dir: Path, limit: int = 0) -> tuple[list[str], list[str]]:
