@@ -391,6 +391,12 @@ def character_summary(kin_texts: list[str], dav_texts: list[str]) -> dict:
 # ---------------------------------------------------------------------------
 # MMS frontend
 # ---------------------------------------------------------------------------
+# Punctuation Kin already uses; MMS/VITS normalize typically removes these.
+# Their disappearance is expected preprocessing — NOT a compatibility failure.
+MMS_EXPECTED_PUNCT = set('.?,!:;"\'“”‘’…—–-_()[]{}')
+FOCUS_CHARS = ("x", "ä", "~")  # inspect explicitly for Dav vs Kin/MMS
+
+
 def mms_frontend_text(tok, text: str) -> str:
     """Apply the tokenizer's own frontend normalize when available.
 
@@ -398,10 +404,8 @@ def mms_frontend_text(tok, text: str) -> str:
     step are intentional frontend behavior, not 'unsupported' vocabulary gaps.
     We do NOT require decode(encode(text)) == text.
     """
-    # Prefer the model's normalize_text if present
     if hasattr(tok, "normalize_text") and callable(tok.normalize_text):
         try:
-            # Only apply when tokenizer is configured to normalize
             if getattr(tok, "normalize", True):
                 return tok.normalize_text(text)
         except Exception:
@@ -409,7 +413,102 @@ def mms_frontend_text(tok, text: str) -> str:
     return text
 
 
-def analyze_mms(mms_dir: Path, dav_texts: list[str]) -> dict:
+def _is_alpha(ch: str) -> bool:
+    return unicodedata.category(ch).startswith("L")
+
+
+def _is_expected_punct(ch: str) -> bool:
+    if ch in MMS_EXPECTED_PUNCT:
+        return True
+    # Unicode punctuation categories (Po, Pd, Pe, …) — intentional strip candidates
+    return unicodedata.category(ch).startswith("P")
+
+
+def _char_token_id(tok, vocab: dict, ch: str):
+    """Return tokenizer id for a single character if present, else None."""
+    if ch in vocab:
+        return vocab[ch]
+    # some vocabs only expose via convert_tokens_to_ids
+    try:
+        tid = tok.convert_tokens_to_ids(ch)
+        if tid is not None and tid != tok.unk_token_id:
+            return tid
+        # if unk_token is the same char (space), treat carefully
+        if tid == tok.unk_token_id and ch == tok.unk_token:
+            return tid
+        if tid is not None and (
+            tok.unk_token_id is None or tid != tok.unk_token_id
+        ):
+            return tid
+    except Exception:
+        pass
+    return None
+
+
+def inspect_focus_chars(tok, vocab: dict, dav_texts: list[str], kin_charset: set[str]) -> dict:
+    """Detailed check for x, ä, ~."""
+    out = {}
+    for ch in FOCUS_CHARS:
+        tid = _char_token_id(tok, vocab, ch)
+        in_kin = ch in kin_charset
+        # Does normalize preserve the char?
+        probe = f"a{ch}b"
+        frontend = mms_frontend_text(tok, probe)
+        preserved = ch in frontend
+        normalized_away = (ch in probe) and (ch not in frontend)
+
+        n_sents = sum(1 for t in dav_texts if ch in t)
+        examples = [t for t in dav_texts if ch in t][:5]
+
+        unk_hits = 0
+        exc_hits = 0
+        for t in (s for s in dav_texts if ch in s):
+            try:
+                ids = tok(t, return_tensors=None)["input_ids"]
+                if tok.unk_token_id is not None and tok.unk_token_id in ids:
+                    # Only count if this char likely caused UNK: encode char alone
+                    try:
+                        one = tok(ch, return_tensors=None)["input_ids"]
+                        if tok.unk_token_id in one:
+                            unk_hits += 1
+                    except Exception:
+                        unk_hits += 1
+            except Exception:
+                exc_hits += 1
+
+        # single-char encode probe
+        single_unk = False
+        single_exc = None
+        single_ids = None
+        try:
+            single_ids = list(tok(ch, return_tensors=None)["input_ids"])
+            if tok.unk_token_id is not None and tok.unk_token_id in single_ids:
+                single_unk = True
+        except Exception as e:
+            single_exc = str(e)
+
+        out[ch] = {
+            "in_kinyarwanda_training_corpus": in_kin,
+            "tokenizer_id": tid,
+            "has_valid_vocab_id": tid is not None and not (
+                tok.unk_token_id is not None and tid == tok.unk_token_id and ch != tok.unk_token
+            ),
+            "preserved_after_normalize": preserved,
+            "intentionally_normalized_away": normalized_away,
+            "single_char_input_ids": single_ids,
+            "single_char_causes_unk": single_unk,
+            "single_char_exception": single_exc,
+            "dav_sentences_containing": n_sents,
+            "dav_sentences_with_unk_when_encoding_char": unk_hits,
+            "dav_sentences_with_encode_exception": exc_hits,
+            "examples": examples,
+        }
+    return out
+
+
+def analyze_mms(
+    mms_dir: Path, dav_texts: list[str], kin_texts: list[str]
+) -> dict:
     from transformers import AutoTokenizer
 
     if not mms_dir.is_dir():
@@ -422,34 +521,52 @@ def analyze_mms(mms_dir: Path, dav_texts: list[str]) -> dict:
     tok = AutoTokenizer.from_pretrained(str(mms_dir))
     vocab = tok.get_vocab()
     unk_id = tok.unk_token_id
-    # Actual tokenizer vocabulary symbols (char-level MMS/VITS)
     vocab_chars = {s for s in vocab if isinstance(s, str) and len(s) == 1}
+
+    kin_charset = set("".join(kin_texts))
+    # MMS-supported alphabet ≈ vocab char keys ∪ chars attested in Kin after same normalize
+    kin_frontend_chars: set[str] = set()
+    for t in kin_texts:
+        kin_frontend_chars.update(mms_frontend_text(tok, t))
+    mms_supported = set(vocab_chars) | {
+        c for c in kin_frontend_chars if not c.isspace()
+    }
+
+    focus = inspect_focus_chars(tok, vocab, dav_texts, kin_charset)
 
     ok_sentences = 0
     failed_sentences = 0
     unknown_token_count = 0
     total_tokens = 0
-    unsupported_chars: Counter = Counter()
+    unsupported_alpha: Counter = Counter()
+    unsupported_special: Counter = Counter()
     failures: list[dict] = []
+    punct_normalized_away_count = 0  # informational only
 
     for text in dav_texts:
-        # Map through the real frontend first (may drop punctuation)
         frontend = mms_frontend_text(tok, text)
+
+        # Track punctuation removed by normalize (expected — not a failure)
+        removed = set(text) - set(frontend)
+        if any(_is_expected_punct(c) for c in removed):
+            punct_normalized_away_count += 1
 
         try:
             enc = tok(text, return_tensors=None)
             ids = list(enc["input_ids"])
         except Exception as e:
             failed_sentences += 1
+            # true gaps among surviving frontend chars
             for ch in frontend:
-                if ch.isspace():
+                if ch.isspace() or _is_expected_punct(ch):
                     continue
-                if ch not in vocab_chars:
-                    unsupported_chars[ch] += 1
+                if ch not in mms_supported and ch not in vocab_chars:
+                    if _is_alpha(ch):
+                        unsupported_alpha[ch] += 1
+                    else:
+                        unsupported_special[ch] += 1
             if len(failures) < 10:
-                failures.append(
-                    {"text": text[:160], "reason": f"encode_error: {e}"}
-                )
+                failures.append({"text": text[:160], "reason": f"encode_error: {e}"})
             continue
 
         total_tokens += len(ids)
@@ -458,18 +575,42 @@ def analyze_mms(mms_dir: Path, dav_texts: list[str]) -> dict:
             n_unk = sum(1 for i in ids if i == unk_id)
         unknown_token_count += n_unk
 
-        # Unsupported = characters that remain after frontend normalize
-        # but are not in the tokenizer vocabulary (cannot be mapped).
+        # True unsupported = remains AFTER Kin-equivalent MMS normalize,
+        # is not expected punctuation, and cannot be mapped by vocab /
+        # is a Dav language char absent from Kin+MMS supported alphabet.
         missing_here = []
         for ch in frontend:
             if ch.isspace():
                 continue
-            if ch not in vocab_chars:
-                unsupported_chars[ch] += 1
-                missing_here.append(ch)
+            # Punctuation still present after normalize: only fail if not in vocab
+            # AND not an expected punct that Kin also uses (q/. /, etc. are fine if mapped)
+            if _is_expected_punct(ch):
+                # If Kin training already has this punct and/or vocab maps it → OK
+                if ch in kin_charset or ch in vocab_chars:
+                    continue
+                # rare punct not in Kin and not in vocab → special unsupported
+                if ch not in vocab_chars:
+                    unsupported_special[ch] += 1
+                    missing_here.append(ch)
+                continue
 
-        # Failure criteria: encode exception (above), UNK ids, or unmapped chars.
-        # NOT decode(encode(text)) round-trip identity.
+            # Alphabetic / other symbols: must be in MMS vocab to be representable
+            in_vocab = ch in vocab_chars
+            in_kin = ch in kin_charset
+            # Characters already in Kin corpus (e.g. q) are not Dav-novel failures
+            # if the tokenizer can map them.
+            if in_vocab:
+                continue
+            # Not in vocab → true unsupported (language gap)
+            if _is_alpha(ch):
+                unsupported_alpha[ch] += 1
+            else:
+                unsupported_special[ch] += 1
+            missing_here.append(ch)
+            # Dav-novel vs Kin is recorded via focus / char summary; still a fail if unmapped
+
+        # Fail only on UNK ids, encode errors (above), or true unmapped non-punct chars.
+        # Do NOT fail because punctuation disappeared during normalize.
         bad = bool(n_unk or missing_here)
         if bad:
             failed_sentences += 1
@@ -479,7 +620,7 @@ def analyze_mms(mms_dir: Path, dav_texts: list[str]) -> dict:
                         "text": text[:160],
                         "frontend_text": frontend[:160],
                         "n_unk": n_unk,
-                        "unmapped_chars": "".join(sorted(set(missing_here)))[:40],
+                        "true_unsupported_chars": "".join(sorted(set(missing_here)))[:40],
                     }
                 )
         else:
@@ -488,7 +629,12 @@ def analyze_mms(mms_dir: Path, dav_texts: list[str]) -> dict:
     n = max(len(dav_texts), 1)
     sentence_cov = 100.0 * ok_sentences / n
     token_cov = 100.0 * (total_tokens - unknown_token_count) / max(total_tokens, 1)
-    unsupported = sorted(unsupported_chars.keys())
+    unsupported_all = sorted(set(unsupported_alpha) | set(unsupported_special))
+
+    # Examples containing x / ä / ~
+    focus_examples = {
+        ch: focus[ch]["examples"] for ch in FOCUS_CHARS if ch in focus
+    }
 
     return {
         "model": "MMS-TTS-Kin",
@@ -501,16 +647,30 @@ def analyze_mms(mms_dir: Path, dav_texts: list[str]) -> dict:
         "token_coverage_percent": round(token_cov, 4),
         "unknown_token_count": unknown_token_count,
         "failed_sentences": failed_sentences,
-        "unsupported_kidawida_characters": unsupported,
-        "unsupported_char_counts": dict(unsupported_chars.most_common()),
+        "affected_sentence_count": failed_sentences,
+        "unsupported_alphabetic_characters": sorted(unsupported_alpha.keys()),
+        "unsupported_special_characters": sorted(unsupported_special.keys()),
+        "unsupported_kidawida_characters": unsupported_all,
+        "unsupported_char_counts": {
+            **dict(unsupported_alpha.most_common()),
+            **dict(unsupported_special.most_common()),
+        },
+        "unsupported_alpha_counts": dict(unsupported_alpha.most_common()),
+        "unsupported_special_counts": dict(unsupported_special.most_common()),
+        "focus_char_inspection": focus,
+        "examples_containing_x_ae_tilde": focus_examples,
+        "sentences_with_expected_punct_normalized_away": punct_normalized_away_count,
         "example_failures": failures,
         "compatibility": interpret(
-            sentence_cov, token_cov, len(unsupported), failed_sentences, n
+            sentence_cov, token_cov, len(unsupported_all), failed_sentences, n
         ),
         "note": (
-            "Compatibility uses unsupported frontend chars, UNK token ids, and "
-            "encode exceptions only. decode(encode(text)) round-trip mismatches "
-            "are ignored (VITS normalize is not required to be lossless)."
+            "Punctuation intentionally removed by MMS/VITS normalize "
+            f"({''.join(sorted(MMS_EXPECTED_PUNCT))}) is NOT treated as unsupported. "
+            "Kin training already includes . , ? ! \" : ; and q — those do not auto-fail. "
+            "Compatibility focuses on true unmapped chars after the same normalize, "
+            "UNK ids, and encode exceptions. Special inspection: x, ä, ~. "
+            "decode(encode(text)) round-trip is not required."
         ),
     }
 
@@ -820,16 +980,24 @@ def write_coverage_csv(path: Path, mms: dict, flex: dict) -> None:
                 }
             )
             continue
+        unsup = model.get("unsupported_kidawida_characters") or []
+        if model.get("model") == "MMS-TTS-Kin":
+            # Prefer split alpha/special in the CSV cell for clarity
+            alpha = "".join(model.get("unsupported_alphabetic_characters") or [])
+            special = "".join(model.get("unsupported_special_characters") or [])
+            unsup_cell = f"alpha=[{alpha}] special=[{special}]"
+        else:
+            unsup_cell = "".join(unsup)
         rows.append(
             {
                 "Model": name,
                 "Sentence Coverage": model.get("sentence_coverage_percent", ""),
                 "Token/Symbol Coverage": model.get("token_coverage_percent", ""),
                 "Unknown Count": model.get("unknown_token_count", ""),
-                "Failed Sentences": model.get("failed_sentences", ""),
-                "Unsupported Kidawida Characters": "".join(
-                    model.get("unsupported_kidawida_characters") or []
+                "Failed Sentences": model.get(
+                    "affected_sentence_count", model.get("failed_sentences", "")
                 ),
+                "Unsupported Kidawida Characters": unsup_cell,
             }
         )
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -893,11 +1061,28 @@ def write_report(
         "",
         "2) MMS-TTS-Kin frontend",
         "----------------------",
-        "  Criteria: unsupported chars after tokenizer normalize, UNK ids, encode exceptions.",
+        "  Criteria: true unsupported chars AFTER MMS normalize (same as Kin), UNK ids,",
+        "  encode exceptions. Expected punctuation removal (. , ? ! \" : ; …) is NOT a failure.",
+        "  Kin already has those punctuations and q — they do not auto-fail.",
         "  NOT used: decode(encode(text)) round-trip identity.",
     ]
 
     lines.extend(_format_model_block(mms))
+    if mms.get("ok") and mms.get("focus_char_inspection"):
+        lines += ["", "  Focus inspection (x, ä, ~):"]
+        for ch, info in mms["focus_char_inspection"].items():
+            lines.append(
+                f"    '{ch}': in_kin={info.get('in_kinyarwanda_training_corpus')} "
+                f"vocab_id={info.get('tokenizer_id')} "
+                f"valid_id={info.get('has_valid_vocab_id')} "
+                f"preserved={info.get('preserved_after_normalize')} "
+                f"normalized_away={info.get('intentionally_normalized_away')} "
+                f"single_unk={info.get('single_char_causes_unk')} "
+                f"dav_sents={info.get('dav_sentences_containing')}"
+            )
+            for ex in (info.get("examples") or [])[:3]:
+                lines.append(f"      e.g. {ex[:160]}")
+
     lines += ["", "3) Kinya-Flex-TTS frontend", "--------------------------"]
     lines.extend(_format_model_block(flex))
     if flex.get("frontend_discovery"):
@@ -933,9 +1118,13 @@ def _format_model_block(model: dict) -> list[str]:
         f"  Sentence coverage %: {model.get('sentence_coverage_percent')}",
         f"  Token/symbol coverage %: {model.get('token_coverage_percent')}",
         f"  Unknown token count: {model.get('unknown_token_count')}",
-        f"  Failed sentences: {model.get('failed_sentences')}",
-        f"  Unsupported Kidaw’ida characters: "
-        f"{''.join(model.get('unsupported_kidawida_characters') or [])}",
+        f"  Failed / affected sentences: {model.get('failed_sentences')}",
+        f"  Unsupported alphabetic: "
+        f"{''.join(model.get('unsupported_alphabetic_characters') or []) or '(none)'}",
+        f"  Unsupported special: "
+        f"{''.join(model.get('unsupported_special_characters') or []) or '(none)'}",
+        f"  Unsupported (all): "
+        f"{''.join(model.get('unsupported_kidawida_characters') or []) or '(none)'}",
         f"  Compatibility: {model.get('compatibility')}",
         "  Example failures (up to 10):",
     ]
@@ -1026,7 +1215,7 @@ def main() -> None:
         mms: dict = {"model": "MMS-TTS-Kin", "ok": False, "error": "skipped"}
     else:
         print("Checking MMS-TTS-Kin frontend…")
-        mms = analyze_mms(args.mms_dir, dav_texts)
+        mms = analyze_mms(args.mms_dir, dav_texts, kin_texts)
 
     if args.skip_flex:
         flex: dict = {"model": "Kinya-Flex-TTS", "ok": False, "error": "skipped"}
