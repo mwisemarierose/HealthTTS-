@@ -1,0 +1,883 @@
+#!/usr/bin/env python3
+"""Compare Kin/Dav *training* corpora and test MMS + Flex frontends on Dav text.
+
+FLEURS is evaluation-only and is NOT used here.
+
+  python scripts/analyze_frontend_coverage.py
+
+Outputs (only):
+  /project/community/rmwisene/tts_frontend_analysis/coverage_summary.csv
+  /project/community/rmwisene/tts_frontend_analysis/character_summary.json
+  /project/community/rmwisene/tts_frontend_analysis/frontend_coverage_report.txt
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import importlib
+import inspect
+import json
+import os
+import re
+import sys
+import unicodedata
+from collections import Counter
+from pathlib import Path
+from typing import Any
+
+
+# ---------------------------------------------------------------------------
+# Defaults (Orchard project storage)
+# ---------------------------------------------------------------------------
+DATA = Path(os.environ.get("DATA", "/project/community/rmwisene/datasets"))
+BASELINES = Path(
+    os.environ.get("BASELINES", "/project/community/rmwisene/tts_baselines")
+)
+OUT_DIR = Path(
+    os.environ.get(
+        "TTS_FRONTEND_ANALYSIS",
+        "/project/community/rmwisene/tts_frontend_analysis",
+    )
+)
+
+KIN_CSV = DATA / "kinyarwanda_tts" / "tts-dataset.csv"
+KIN_DIR = DATA / "kinyarwanda_tts"
+DAV_DIR = DATA / "kidawida_cv27"
+MMS_DIR = BASELINES / "mms_tts_kin"
+FLEX_CKPT = BASELINES / "kinya_flex_tts" / "kinya_flex_tts_base_trained.pt"
+DEEPKIN_ROOT = Path(
+    os.environ.get(
+        "DEEPKIN_ROOT",
+        "/project/community/rmwisene/code/ac-ai-models/DeepKIN-AgAI",
+    )
+)
+
+TEXT_KEYS = (
+    "text",
+    "sentence",
+    "transcript",
+    "transcription",
+    "normalized_text",
+    "raw_transcription",
+    "raw_text",
+)
+
+
+# ---------------------------------------------------------------------------
+# Text utils
+# ---------------------------------------------------------------------------
+def normalize_text(s: str) -> str:
+    t = unicodedata.normalize("NFC", s or "")
+    t = t.lower().strip()
+    t = re.sub(r"\s+", " ", t)
+    return t
+
+
+def alphabetic_chars(texts: list[str]) -> set[str]:
+    """Unique alphabetic characters (Unicode category starting with L)."""
+    out: set[str] = set()
+    for t in texts:
+        for ch in t:
+            if unicodedata.category(ch).startswith("L"):
+                out.add(ch)
+    return out
+
+
+def detect_text_column(fieldnames: list[str] | None) -> str | None:
+    if not fieldnames:
+        return None
+    lower = {f.lower().strip(): f for f in fieldnames if f}
+    for key in TEXT_KEYS:
+        if key in lower:
+            return lower[key]
+    # fuzzy: any column containing these substrings
+    for cand in ("sentence", "transcript", "text"):
+        for low, orig in lower.items():
+            if cand in low:
+                return orig
+    return None
+
+
+def read_table_texts(path: Path, limit: int = 0) -> tuple[list[str], str]:
+    """Return (normalized texts, detected column name)."""
+    for delim in ("\t", ","):
+        with path.open(encoding="utf-8", newline="", errors="replace") as f:
+            reader = csv.DictReader(f, delimiter=delim)
+            col = detect_text_column(list(reader.fieldnames or []))
+            if col is None:
+                continue
+            texts: list[str] = []
+            for row in reader:
+                raw = (row.get(col) or "").strip()
+                if not raw:
+                    continue
+                texts.append(normalize_text(raw))
+                if limit and len(texts) >= limit:
+                    break
+            if texts:
+                return texts, f"{path.name}:{col} (delim={repr(delim)})"
+    raise ValueError(f"No transcript/text column found in {path}")
+
+
+def collect_dav_texts(dav_dir: Path, limit: int = 0) -> tuple[list[str], list[str]]:
+    """Collect Kidaw’ida training texts. Prefer train/validated; skip FLEURS."""
+    if not dav_dir.is_dir():
+        raise FileNotFoundError(f"Missing Kidaw’ida corpus: {dav_dir}")
+
+    candidates: list[Path] = []
+    for pat in ("*.tsv", "*.csv"):
+        candidates.extend(dav_dir.rglob(pat))
+
+    def rank(p: Path) -> tuple:
+        n = p.name.lower()
+        # prefer Common Voice train / validated
+        score = 100
+        if "train" in n:
+            score = 0
+        elif "validated" in n:
+            score = 1
+        elif n in ("clip_durations.tsv",):
+            score = 500
+        elif any(x in n for x in ("invalidated", "other", "reported", "duration")):
+            score = 400
+        elif "dev" in n or "test" in n:
+            score = 50  # still usable if train missing; not FLEURS
+        if "fleurs" in str(p).lower():
+            score = 10_000
+        return (score, str(p))
+
+    candidates = sorted({c.resolve() for c in candidates}, key=rank)
+    notes: list[str] = []
+    texts: list[str] = []
+    seen: set[str] = set()
+
+    for path in candidates:
+        if "fleurs" in str(path).lower():
+            notes.append(f"SKIP (FLEURS excluded): {path}")
+            continue
+        try:
+            part, src = read_table_texts(path, limit=0)
+        except Exception as e:
+            notes.append(f"skip {path}: {e}")
+            continue
+        added = 0
+        for t in part:
+            if t not in seen:
+                seen.add(t)
+                texts.append(t)
+                added += 1
+                if limit and len(texts) >= limit:
+                    notes.append(f"used {src} (+{added}); hit --limit")
+                    return texts, notes
+        notes.append(f"used {src} (+{added} unique)")
+        # If we already got a solid train/validated file, stop early
+        name = path.name.lower()
+        if added > 0 and ("train" in name or "validated" in name) and len(texts) >= 100:
+            # continue to merge other train-like files but don't require all
+            pass
+
+    if not texts:
+        raise RuntimeError(
+            f"No Kidaw’ida transcripts found under {dav_dir}. "
+            f"Tried: {[str(c) for c in candidates[:20]]}"
+        )
+    return texts, notes
+
+
+def collect_kin_texts(kin_csv: Path, kin_dir: Path, limit: int = 0) -> tuple[list[str], str]:
+    if kin_csv.is_file():
+        texts, src = read_table_texts(kin_csv, limit=limit)
+        return texts, src
+    # fallback: search kin_dir (still not FLEURS)
+    for path in sorted(kin_dir.rglob("*.csv")) + sorted(kin_dir.rglob("*.tsv")):
+        if "fleurs" in str(path).lower():
+            continue
+        try:
+            return read_table_texts(path, limit=limit)
+        except Exception:
+            continue
+    raise FileNotFoundError(
+        f"Missing Kinyarwanda metadata. Expected {kin_csv}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Character comparison
+# ---------------------------------------------------------------------------
+def character_summary(kin_texts: list[str], dav_texts: list[str]) -> dict:
+    kin_alpha = alphabetic_chars(kin_texts)
+    dav_alpha = alphabetic_chars(dav_texts)
+    shared = kin_alpha & dav_alpha
+    kin_only = kin_alpha - dav_alpha
+    dav_only = dav_alpha - kin_alpha
+    denom = len(kin_alpha | dav_alpha) or 1
+    overlap_pct = 100.0 * len(shared) / denom
+    # also report coverage of Dav alphabet by Kin alphabet
+    dav_covered_by_kin = (
+        100.0 * len(dav_alpha & kin_alpha) / (len(dav_alpha) or 1)
+    )
+    return {
+        "n_utterances_kinyarwanda": len(kin_texts),
+        "n_utterances_kidawida": len(dav_texts),
+        "unique_alphabetic_chars_kinyarwanda": sorted(kin_alpha),
+        "unique_alphabetic_chars_kidawida": sorted(dav_alpha),
+        "n_unique_alphabetic_kinyarwanda": len(kin_alpha),
+        "n_unique_alphabetic_kidawida": len(dav_alpha),
+        "shared_alphabetic_chars": sorted(shared),
+        "n_shared_alphabetic_chars": len(shared),
+        "kinyarwanda_only_alphabetic_chars": sorted(kin_only),
+        "kidawida_only_alphabetic_chars": sorted(dav_only),
+        "character_overlap_percent_union": round(overlap_pct, 4),
+        "kidawida_alphabet_covered_by_kinyarwanda_percent": round(
+            dav_covered_by_kin, 4
+        ),
+        "note": (
+            "FLEURS Kinyarwanda was NOT used. Comparison is training corpora only. "
+            "This does not prove coverage of the entire Kidaw’ida language."
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# MMS frontend
+# ---------------------------------------------------------------------------
+def analyze_mms(mms_dir: Path, dav_texts: list[str]) -> dict:
+    from transformers import AutoTokenizer
+
+    if not mms_dir.is_dir():
+        return {
+            "model": "MMS-TTS-Kin",
+            "ok": False,
+            "error": f"Missing MMS model dir: {mms_dir}",
+        }
+
+    tok = AutoTokenizer.from_pretrained(str(mms_dir))
+    vocab = tok.get_vocab()
+    unk_id = tok.unk_token_id
+    # single-character vocab entries (frontend alphabet)
+    vocab_chars = {s for s in vocab if isinstance(s, str) and len(s) == 1}
+
+    ok_sentences = 0
+    failed_sentences = 0
+    unknown_token_count = 0
+    total_tokens = 0
+    unsupported_chars: Counter = Counter()
+    failures: list[dict] = []
+
+    for text in dav_texts:
+        try:
+            enc = tok(text, return_tensors=None)
+            ids = list(enc["input_ids"])
+        except Exception as e:
+            failed_sentences += 1
+            for ch in text:
+                if unicodedata.category(ch).startswith("L") and ch not in vocab_chars:
+                    unsupported_chars[ch] += 1
+            if len(failures) < 10:
+                failures.append(
+                    {"text": text[:160], "reason": f"encode_error: {e}"}
+                )
+            continue
+
+        total_tokens += len(ids)
+        n_unk = 0
+        if unk_id is not None:
+            n_unk = sum(1 for i in ids if i == unk_id)
+        unknown_token_count += n_unk
+
+        # chars in input missing from tokenizer char vocab
+        missing_here = []
+        for ch in text:
+            if ch.isspace():
+                continue
+            if ch not in vocab_chars:
+                # MMS VITS often lowercases inside tokenizer; already normalized lower
+                unsupported_chars[ch] += 1
+                missing_here.append(ch)
+
+        # round-trip drop check (best-effort)
+        try:
+            decoded = normalize_text(tok.decode(ids, skip_special_tokens=True))
+            # blank-separated VITS decode may insert spaces between chars
+            dec_compact = re.sub(r"\s+", "", decoded)
+            src_compact = re.sub(r"\s+", "", text)
+            dropped = sorted(set(src_compact) - set(dec_compact))
+        except Exception:
+            dropped = []
+
+        bad = bool(n_unk or missing_here or dropped)
+        if bad:
+            failed_sentences += 1
+            if len(failures) < 10:
+                failures.append(
+                    {
+                        "text": text[:160],
+                        "n_unk": n_unk,
+                        "missing_chars": "".join(sorted(set(missing_here)))[:40],
+                        "dropped_vs_decode": "".join(dropped)[:40],
+                    }
+                )
+        else:
+            ok_sentences += 1
+
+    n = max(len(dav_texts), 1)
+    sentence_cov = 100.0 * ok_sentences / n
+    token_cov = 100.0 * (total_tokens - unknown_token_count) / max(total_tokens, 1)
+    unsupported = sorted(unsupported_chars.keys())
+
+    return {
+        "model": "MMS-TTS-Kin",
+        "ok": True,
+        "frontend": "transformers.AutoTokenizer / VitsTokenizer",
+        "model_dir": str(mms_dir),
+        "vocab_size": len(vocab),
+        "n_sentences": len(dav_texts),
+        "sentence_coverage_percent": round(sentence_cov, 4),
+        "token_coverage_percent": round(token_cov, 4),
+        "unknown_token_count": unknown_token_count,
+        "failed_sentences": failed_sentences,
+        "unsupported_kidawida_characters": unsupported,
+        "unsupported_char_counts": dict(unsupported_chars.most_common()),
+        "example_failures": failures,
+        "compatibility": interpret(
+            sentence_cov, token_cov, len(unsupported), failed_sentences, n
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Kinya-Flex — discover real frontend from DeepKIN source (no guessing)
+# ---------------------------------------------------------------------------
+def discover_flex_frontend(deepkin_root: Path) -> dict:
+    """Inspect DeepKIN files to identify the real text frontend used by Flex."""
+    discovery: dict[str, Any] = {
+        "deepkin_root": str(deepkin_root),
+        "checkpoint": str(FLEX_CKPT),
+        "discovered": False,
+        "module": None,
+        "function": None,
+        "source_file": None,
+        "symbol_list_attr": None,
+        "symbols": None,
+        "evidence": [],
+    }
+    if not deepkin_root.is_dir():
+        discovery["error"] = f"DeepKIN root not found: {deepkin_root}"
+        return discovery
+
+    # Evidence from our own eval script + DeepKIN layout
+    eval_script = Path(__file__).resolve().parent / "eval_flex_fleurs.py"
+    if eval_script.is_file():
+        txt = eval_script.read_text(encoding="utf-8", errors="replace")
+        if "deepkin.data.kinya_norm import text_to_sequence" in txt:
+            discovery["evidence"].append(
+                f"{eval_script.name} imports deepkin.data.kinya_norm.text_to_sequence "
+                "and calls text_to_sequence(text, norm=True) before FlexKinyaTTS"
+            )
+
+    kinya_norm = deepkin_root / "deepkin" / "data" / "kinya_norm.py"
+    if kinya_norm.is_file():
+        discovery["evidence"].append(f"Found {kinya_norm}")
+        src = kinya_norm.read_text(encoding="utf-8", errors="replace")
+        if "def text_to_sequence" in src:
+            discovery["module"] = "deepkin.data.kinya_norm"
+            discovery["function"] = "text_to_sequence"
+            discovery["source_file"] = str(kinya_norm)
+            discovery["discovered"] = True
+            discovery["evidence"].append(
+                "kinya_norm.py defines text_to_sequence (Flex text frontend)"
+            )
+
+        # Discover symbol tables by reading the file (no guessing names beyond what's present)
+        for attr in re.findall(
+            r"^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*[\[\(\{]", src, flags=re.M
+        ):
+            if any(
+                k in attr.lower()
+                for k in ("symbol", "vocab", "phone", "char", "alphabet")
+            ):
+                discovery["evidence"].append(
+                    f"kinya_norm.py assigns symbol-like name: {attr}"
+                )
+                if discovery["symbol_list_attr"] is None:
+                    discovery["symbol_list_attr"] = attr
+
+        # Also search related modules referenced by import in kinya_norm
+        for m in re.findall(r"from\s+([\w.]+)\s+import\s+([^\n]+)", src):
+            discovery["evidence"].append(f"kinya_norm imports from {m[0]}: {m[1].strip()}")
+
+    flex_tts = deepkin_root / "deepkin" / "models" / "flex_tts.py"
+    if flex_tts.is_file():
+        fsrc = flex_tts.read_text(encoding="utf-8", errors="replace")
+        discovery["evidence"].append(f"Found {flex_tts}")
+        for line in fsrc.splitlines():
+            if "text_to_sequence" in line or "kinya_norm" in line:
+                discovery["evidence"].append(f"flex_tts.py: {line.strip()[:160]}")
+
+    return discovery
+
+
+def load_flex_symbols(deepkin_root: Path, discovery: dict) -> list[str] | None:
+    if str(deepkin_root) not in sys.path:
+        sys.path.insert(0, str(deepkin_root))
+    try:
+        mod = importlib.import_module("deepkin.data.kinya_norm")
+    except Exception:
+        return None
+
+    # Prefer attribute named in discovery; else scan module for symbol-like lists/dicts
+    candidates: list[str] = []
+    if discovery.get("symbol_list_attr"):
+        candidates.append(discovery["symbol_list_attr"])
+    for name, obj in vars(mod).items():
+        if name.startswith("_") and name not in candidates:
+            # allow private symbol maps
+            pass
+        low = name.lower()
+        if any(k in low for k in ("symbol", "vocab", "phone", "char", "alphabet")):
+            candidates.append(name)
+
+    for name in candidates:
+        if not hasattr(mod, name):
+            continue
+        obj = getattr(mod, name)
+        if isinstance(obj, dict):
+            return [str(k) for k in obj.keys()]
+        if isinstance(obj, (list, tuple, set)):
+            return [str(x) for x in obj]
+    return None
+
+
+def analyze_flex(deepkin_root: Path, dav_texts: list[str]) -> dict:
+    discovery = discover_flex_frontend(deepkin_root)
+    result: dict[str, Any] = {
+        "model": "Kinya-Flex-TTS",
+        "checkpoint": str(FLEX_CKPT),
+        "checkpoint_exists": FLEX_CKPT.is_file(),
+        "frontend_discovery": discovery,
+    }
+
+    if not discovery.get("discovered"):
+        result["ok"] = False
+        result["error"] = (
+            "Could not identify Flex text frontend from local DeepKIN files. "
+            "Expected deepkin/data/kinya_norm.py::text_to_sequence "
+            f"under {deepkin_root}."
+        )
+        result["compatibility"] = "Significant adaptation needed"
+        # still try symbol comparison if any file-level list was found later
+        return result
+
+    if str(deepkin_root) not in sys.path:
+        sys.path.insert(0, str(deepkin_root))
+
+    try:
+        mod = importlib.import_module(discovery["module"])
+        text_to_sequence = getattr(mod, discovery["function"])
+    except Exception as e:
+        result["ok"] = False
+        result["error"] = f"Failed to import discovered frontend: {e}"
+        result["compatibility"] = "Significant adaptation needed"
+        return result
+
+    # Confirm signature from source, not guess
+    try:
+        sig = str(inspect.signature(text_to_sequence))
+        result["frontend_signature"] = f"{discovery['module']}.{discovery['function']}{sig}"
+    except Exception:
+        result["frontend_signature"] = (
+            f"{discovery['module']}.{discovery['function']}(...)"
+        )
+
+    symbols = load_flex_symbols(deepkin_root, discovery)
+    symbol_chars = set()
+    if symbols:
+        for s in symbols:
+            if len(s) == 1:
+                symbol_chars.add(s.lower())
+        result["discovered_symbol_count"] = len(symbols)
+        result["discovered_symbol_list_attr"] = discovery.get("symbol_list_attr")
+
+    ok_sentences = 0
+    failed_sentences = 0
+    unknown_token_count = 0
+    total_symbols = 0
+    unsupported_chars: Counter = Counter()
+    failures: list[dict] = []
+
+    for text in dav_texts:
+        try:
+            # eval_flex_fleurs.py uses norm=True — match that call site
+            seq = text_to_sequence(text, norm=True)
+        except TypeError:
+            try:
+                seq = text_to_sequence(text)
+            except Exception as e:
+                failed_sentences += 1
+                if len(failures) < 10:
+                    failures.append({"text": text[:160], "reason": f"encode_error: {e}"})
+                continue
+        except Exception as e:
+            failed_sentences += 1
+            if len(failures) < 10:
+                failures.append({"text": text[:160], "reason": f"encode_error: {e}"})
+            continue
+
+        if seq is None:
+            failed_sentences += 1
+            if len(failures) < 10:
+                failures.append({"text": text[:160], "reason": "sequence_is_None"})
+            continue
+
+        try:
+            seq_list = list(seq)
+        except TypeError:
+            failed_sentences += 1
+            if len(failures) < 10:
+                failures.append({"text": text[:160], "reason": "sequence_not_iterable"})
+            continue
+
+        if len(seq_list) == 0 and text.strip():
+            failed_sentences += 1
+            if len(failures) < 10:
+                failures.append({"text": text[:160], "reason": "empty_sequence"})
+            continue
+
+        total_symbols += len(seq_list)
+
+        # If we have a char-level symbol inventory, count unsupported alpha chars
+        missing = []
+        if symbol_chars:
+            for ch in text:
+                if not unicodedata.category(ch).startswith("L"):
+                    continue
+                if ch not in symbol_chars:
+                    unsupported_chars[ch] += 1
+                    missing.append(ch)
+                    unknown_token_count += 1
+
+        if missing:
+            failed_sentences += 1
+            if len(failures) < 10:
+                failures.append(
+                    {
+                        "text": text[:160],
+                        "missing_chars": "".join(sorted(set(missing)))[:40],
+                    }
+                )
+        else:
+            ok_sentences += 1
+
+    n = max(len(dav_texts), 1)
+    sentence_cov = 100.0 * ok_sentences / n
+    if symbol_chars and total_symbols:
+        # symbol coverage ≈ non-missing alpha over (approx) — use token proxy
+        # Here unknown_token_count counted missing alpha occurrences
+        alpha_total = sum(
+            1 for t in dav_texts for ch in t if unicodedata.category(ch).startswith("L")
+        )
+        token_cov = 100.0 * (alpha_total - unknown_token_count) / max(alpha_total, 1)
+    elif total_symbols:
+        # No inventory: treat successful encode as full token coverage
+        token_cov = 100.0 * (n - failed_sentences) / n
+        # unknown unknown without inventory
+    else:
+        token_cov = 0.0
+
+    unsupported = sorted(unsupported_chars.keys())
+    result.update(
+        {
+            "ok": True,
+            "frontend": result.get("frontend_signature"),
+            "n_sentences": len(dav_texts),
+            "sentence_coverage_percent": round(sentence_cov, 4),
+            "token_coverage_percent": round(token_cov, 4),
+            "unknown_token_count": unknown_token_count,
+            "failed_sentences": failed_sentences,
+            "unsupported_kidawida_characters": unsupported,
+            "unsupported_char_counts": dict(unsupported_chars.most_common()),
+            "example_failures": failures,
+            "compatibility": interpret(
+                sentence_cov, token_cov, len(unsupported), failed_sentences, n
+            ),
+            "note": (
+                "Frontend identified from DeepKIN source + eval_flex_fleurs.py call site "
+                "(text_to_sequence). Checkpoint provides weights; text frontend is code-side."
+            ),
+        }
+    )
+    if not symbol_chars:
+        result["symbol_inventory_note"] = (
+            "Ran text_to_sequence on all Dav sentences. "
+            "No explicit character/symbol list attribute was loadable from kinya_norm; "
+            "unsupported-character list may be incomplete (failures still counted)."
+        )
+    return result
+
+
+def interpret(
+    sentence_cov: float,
+    token_cov: float,
+    n_unsupported: int,
+    failed: int,
+    n: int,
+) -> str:
+    """Final label for one baseline on *this corpus* only."""
+    fail_rate = failed / max(n, 1)
+    if sentence_cov >= 99.0 and token_cov >= 99.0 and n_unsupported == 0:
+        return "Full compatibility"
+    if sentence_cov >= 90.0 and token_cov >= 95.0 and fail_rate <= 0.10:
+        return "Minor frontend adaptation needed"
+    return "Significant adaptation needed"
+
+
+# ---------------------------------------------------------------------------
+# Outputs
+# ---------------------------------------------------------------------------
+def write_coverage_csv(path: Path, mms: dict, flex: dict) -> None:
+    rows = []
+    for model in (mms, flex):
+        name = model.get("model", "?")
+        if not model.get("ok"):
+            rows.append(
+                {
+                    "Model": name,
+                    "Sentence Coverage": "",
+                    "Token/Symbol Coverage": "",
+                    "Unknown Count": "",
+                    "Failed Sentences": "",
+                    "Unsupported Kidawida Characters": model.get("error", "N/A"),
+                }
+            )
+            continue
+        rows.append(
+            {
+                "Model": name,
+                "Sentence Coverage": model.get("sentence_coverage_percent", ""),
+                "Token/Symbol Coverage": model.get("token_coverage_percent", ""),
+                "Unknown Count": model.get("unknown_token_count", ""),
+                "Failed Sentences": model.get("failed_sentences", ""),
+                "Unsupported Kidawida Characters": "".join(
+                    model.get("unsupported_kidawida_characters") or []
+                ),
+            }
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(
+            f,
+            fieldnames=[
+                "Model",
+                "Sentence Coverage",
+                "Token/Symbol Coverage",
+                "Unknown Count",
+                "Failed Sentences",
+                "Unsupported Kidawida Characters",
+            ],
+        )
+        w.writeheader()
+        w.writerows(rows)
+
+
+def write_report(
+    path: Path,
+    char_sum: dict,
+    mms: dict,
+    flex: dict,
+    kin_src: str,
+    dav_notes: list[str],
+) -> None:
+    lines: list[str] = []
+    lines += [
+        "TTS frontend coverage report",
+        "============================",
+        "",
+        "Scope: Kinyarwanda + Kidaw’ida TRAINING corpora only.",
+        "FLEURS Kinyarwanda was used for baseline evaluation only and is EXCLUDED here.",
+        "This does NOT claim support for the entire Kidaw’ida language — only the available training corpus.",
+        "",
+        f"Kinyarwanda source: {kin_src}",
+        f"Kidaw’ida dir: {DAV_DIR}",
+        "",
+        "Kidaw’ida file selection notes:",
+    ]
+    for n in dav_notes[:40]:
+        lines.append(f"  - {n}")
+    lines += [
+        "",
+        "1) Corpus character comparison (alphabetic)",
+        "------------------------------------------",
+        f"  Kin utterances: {char_sum['n_utterances_kinyarwanda']}",
+        f"  Dav utterances: {char_sum['n_utterances_kidawida']}",
+        f"  Kin unique alpha chars ({char_sum['n_unique_alphabetic_kinyarwanda']}): "
+        f"{''.join(char_sum['unique_alphabetic_chars_kinyarwanda'])}",
+        f"  Dav unique alpha chars ({char_sum['n_unique_alphabetic_kidawida']}): "
+        f"{''.join(char_sum['unique_alphabetic_chars_kidawida'])}",
+        f"  Shared ({char_sum['n_shared_alphabetic_chars']}): "
+        f"{''.join(char_sum['shared_alphabetic_chars'])}",
+        f"  Kin-only: {''.join(char_sum['kinyarwanda_only_alphabetic_chars'])}",
+        f"  Dav-only: {''.join(char_sum['kidawida_only_alphabetic_chars'])}",
+        f"  Overlap % (shared / union): {char_sum['character_overlap_percent_union']}",
+        f"  Dav alphabet covered by Kin %: "
+        f"{char_sum['kidawida_alphabet_covered_by_kinyarwanda_percent']}",
+        "",
+        "2) MMS-TTS-Kin frontend",
+        "----------------------",
+    ]
+    lines.extend(_format_model_block(mms))
+    lines += ["", "3) Kinya-Flex-TTS frontend", "--------------------------"]
+    lines.extend(_format_model_block(flex))
+    if flex.get("frontend_discovery"):
+        lines += ["", "  Flex frontend discovery evidence:"]
+        for ev in flex["frontend_discovery"].get("evidence", [])[:20]:
+            lines.append(f"    - {ev}")
+
+    lines += [
+        "",
+        "4) Final decision (this training corpus only)",
+        "---------------------------------------------",
+        f"  MMS-TTS-Kin:     {mms.get('compatibility', mms.get('error', 'N/A'))}",
+        f"  Kinya-Flex-TTS:  {flex.get('compatibility', flex.get('error', 'N/A'))}",
+        "",
+        "Labels:",
+        "  - Full compatibility",
+        "  - Minor frontend adaptation needed",
+        "  - Significant adaptation needed",
+        "",
+    ]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def _format_model_block(model: dict) -> list[str]:
+    if not model.get("ok"):
+        return [
+            f"  ERROR: {model.get('error', 'unknown')}",
+            f"  Compatibility: {model.get('compatibility', 'Significant adaptation needed')}",
+        ]
+    lines = [
+        f"  Frontend: {model.get('frontend')}",
+        f"  Sentence coverage %: {model.get('sentence_coverage_percent')}",
+        f"  Token/symbol coverage %: {model.get('token_coverage_percent')}",
+        f"  Unknown token count: {model.get('unknown_token_count')}",
+        f"  Failed sentences: {model.get('failed_sentences')}",
+        f"  Unsupported Kidaw’ida characters: "
+        f"{''.join(model.get('unsupported_kidawida_characters') or [])}",
+        f"  Compatibility: {model.get('compatibility')}",
+        "  Example failures (up to 10):",
+    ]
+    fails = model.get("example_failures") or []
+    if not fails:
+        lines.append("    (none)")
+    for i, ex in enumerate(fails, 1):
+        lines.append(f"    [{i}] {json.dumps(ex, ensure_ascii=False)}")
+    if model.get("symbol_inventory_note"):
+        lines.append(f"  Note: {model['symbol_inventory_note']}")
+    if model.get("note"):
+        lines.append(f"  Note: {model['note']}")
+    return lines
+
+
+def print_summary_table(mms: dict, flex: dict) -> None:
+    def cell(m: dict, key: str) -> str:
+        if not m.get("ok"):
+            if key == "Unsupported Kidawida Characters":
+                return str(m.get("error", "N/A"))[:60]
+            return "N/A"
+        if key == "Model":
+            return str(m.get("model"))
+        if key == "Sentence Coverage":
+            return f"{m.get('sentence_coverage_percent')}%"
+        if key == "Token/Symbol Coverage":
+            return f"{m.get('token_coverage_percent')}%"
+        if key == "Unknown Count":
+            return str(m.get("unknown_token_count"))
+        if key == "Failed Sentences":
+            return str(m.get("failed_sentences"))
+        if key == "Unsupported Kidawida Characters":
+            return "".join(m.get("unsupported_kidawida_characters") or []) or "(none)"
+        return ""
+
+    cols = [
+        "Model",
+        "Sentence Coverage",
+        "Token/Symbol Coverage",
+        "Unknown Count",
+        "Failed Sentences",
+        "Unsupported Kidawida Characters",
+    ]
+    rows = [[cell(m, c) for c in cols] for m in (mms, flex)]
+    widths = [max(len(cols[i]), *(len(r[i]) for r in rows)) for i in range(len(cols))]
+
+    def fmt(row: list[str]) -> str:
+        return " | ".join(row[i].ljust(widths[i]) for i in range(len(cols)))
+
+    sep = "-+-".join("-" * w for w in widths)
+    print("\n=== coverage_summary ===")
+    print(fmt(cols))
+    print(sep)
+    for r in rows:
+        print(fmt(r))
+    print()
+    print("Compatibility:")
+    print(f"  MMS-TTS-Kin:    {mms.get('compatibility', mms.get('error'))}")
+    print(f"  Kinya-Flex-TTS: {flex.get('compatibility', flex.get('error'))}")
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(
+        description="Kin/Dav training-corpus frontend coverage for MMS + Flex"
+    )
+    ap.add_argument("--kin_csv", type=Path, default=KIN_CSV)
+    ap.add_argument("--kin_dir", type=Path, default=KIN_DIR)
+    ap.add_argument("--dav_dir", type=Path, default=DAV_DIR)
+    ap.add_argument("--mms_dir", type=Path, default=MMS_DIR)
+    ap.add_argument("--deepkin_root", type=Path, default=DEEPKIN_ROOT)
+    ap.add_argument("--out_dir", type=Path, default=OUT_DIR)
+    ap.add_argument("--limit", type=int, default=0, help="Max utterances/language (0=all)")
+    ap.add_argument("--skip_mms", action="store_true")
+    ap.add_argument("--skip_flex", action="store_true")
+    args = ap.parse_args()
+
+    print("Loading Kinyarwanda training texts (NOT FLEURS)…")
+    kin_texts, kin_src = collect_kin_texts(args.kin_csv, args.kin_dir, args.limit)
+    print(f"  n={len(kin_texts)} from {kin_src}")
+
+    print("Loading Kidaw’ida training texts…")
+    dav_texts, dav_notes = collect_dav_texts(args.dav_dir, args.limit)
+    print(f"  n={len(dav_texts)}")
+
+    char_sum = character_summary(kin_texts, dav_texts)
+
+    if args.skip_mms:
+        mms: dict = {"model": "MMS-TTS-Kin", "ok": False, "error": "skipped"}
+    else:
+        print("Checking MMS-TTS-Kin frontend…")
+        mms = analyze_mms(args.mms_dir, dav_texts)
+
+    if args.skip_flex:
+        flex: dict = {"model": "Kinya-Flex-TTS", "ok": False, "error": "skipped"}
+    else:
+        print("Discovering + checking Kinya-Flex frontend…")
+        flex = analyze_flex(args.deepkin_root, dav_texts)
+
+    out = args.out_dir
+    out.mkdir(parents=True, exist_ok=True)
+    csv_path = out / "coverage_summary.csv"
+    json_path = out / "character_summary.json"
+    txt_path = out / "frontend_coverage_report.txt"
+
+    write_coverage_csv(csv_path, mms, flex)
+    json_path.write_text(
+        json.dumps(char_sum, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+    write_report(txt_path, char_sum, mms, flex, kin_src, dav_notes)
+
+    print_summary_table(mms, flex)
+    print(f"Wrote {csv_path}")
+    print(f"Wrote {json_path}")
+    print(f"Wrote {txt_path}")
+
+
+if __name__ == "__main__":
+    main()
