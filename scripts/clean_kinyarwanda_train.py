@@ -165,21 +165,55 @@ def index_audio(audio_dir: Path) -> dict[str, Path]:
     return index
 
 
+def _norm_id(s: str) -> str:
+    """Normalize ids for fuzzy audio matching."""
+    t = (s or "").strip().lower()
+    t = t.replace("\\", "/")
+    for ext in (".wav", ".flac", ".mp3", ".ogg", ".opus"):
+        if t.endswith(ext):
+            t = t[: -len(ext)]
+            break
+    # mbazaNLP: metadata TTS_1_2 ↔ audio "TTS 1_2.wav"
+    t = re.sub(r"^tts[\s_]+", "tts_", t)
+    t = re.sub(r"[\s\-]+", "_", t)
+    return t
+
+
+def meta_id_to_audio_stem(utt_id: str) -> list[str]:
+    """Map metadata id TTS_1_2 → audio stems like 'TTS 1_2'."""
+    raw = (utt_id or "").strip()
+    stems = [raw, Path(raw).stem]
+    # TTS_1_2 → TTS 1_2  (space after TTS)
+    if re.match(r"^TTS_\d", raw, flags=re.I):
+        stems.append(re.sub(r"^TTS_", "TTS ", raw, count=1, flags=re.I))
+    # TTS 1_2 → TTS_1_2
+    if re.match(r"^TTS\s+\d", raw, flags=re.I):
+        stems.append(re.sub(r"^TTS\s+", "TTS_", raw, count=1, flags=re.I))
+    return list(dict.fromkeys(stems))  # unique, preserve order
+
+
 def resolve_audio(utt_id: str, index: dict[str, Path], audio_dir: Path) -> Path | None:
-    candidates = [
-        utt_id,
-        utt_id.lower(),
-        f"{utt_id}.wav",
-        f"{utt_id}.flac",
-        f"{utt_id}.mp3",
-    ]
+    stems = meta_id_to_audio_stem(utt_id)
+    candidates: list[str] = []
+    for stem in stems:
+        candidates.extend(
+            [
+                stem,
+                stem.lower(),
+                f"{stem}.wav",
+                f"{stem}.flac",
+                f"{stem}.mp3",
+                Path(stem).name,
+            ]
+        )
     for c in candidates:
         if c in index:
             return index[c]
-    # fuzzy: id may be path-like
-    direct = audio_dir / f"{utt_id}.wav"
-    if direct.is_file():
-        return direct
+    for stem in stems:
+        for ext in (".wav", ".flac", ".mp3"):
+            direct = audio_dir / f"{stem}{ext}"
+            if direct.is_file():
+                return direct
     return None
 
 
@@ -229,12 +263,32 @@ def main() -> None:
 
     print(f"Indexing audio under {audio_dir} …")
     index = index_audio(audio_dir)
-    print(f"  audio files: {len({p for p in index.values()})}")
+    unique_audio = sorted({p.resolve() for p in index.values()}, key=lambda p: p.name)
+    print(f"  audio files: {len(unique_audio)}")
+    if rows:
+        print(f"  sample meta ids: {[r['id'] for r in rows[:5]]}")
+    if unique_audio:
+        print(f"  sample audio:    {[p.name for p in unique_audio[:5]]}")
+
+    # Build flexible matchers (mbazaNLP often uses nested dirs / different stems)
+    by_stem: dict[str, Path] = {}
+    by_stem_norm: dict[str, Path] = {}
+    for p in unique_audio:
+        by_stem[p.stem] = p
+        by_stem_norm[_norm_id(p.stem)] = p
+        # also index parent/stem style keys
+        try:
+            rel = p.relative_to(audio_dir)
+            by_stem[str(rel.with_suffix(""))] = p
+            by_stem_norm[_norm_id(str(rel.with_suffix("")))] = p
+        except ValueError:
+            pass
 
     kept_rows: list[dict] = []
     drop_reasons: Counter = Counter()
     durations: list[float] = []
     total_dur = 0.0
+    match_debug_left = 5
 
     for i, row in enumerate(rows, 1):
         utt_id = row["id"]
@@ -243,6 +297,17 @@ def main() -> None:
 
         reason = ""
         audio = resolve_audio(utt_id, index, audio_dir)
+        if audio is None:
+            # try normalized / relative keys
+            nid = _norm_id(utt_id)
+            audio = by_stem.get(utt_id) or by_stem_norm.get(nid)
+            if audio is None:
+                # id may be like audio/TTS_1_2 or path without extension
+                stem = Path(utt_id).stem
+                audio = by_stem.get(stem) or by_stem_norm.get(_norm_id(stem))
+        if audio is None and match_debug_left > 0:
+            print(f"  [debug] no audio for id={utt_id!r} norm={_norm_id(utt_id)!r}")
+            match_debug_left -= 1
         dur = None
 
         if not cleaned:
