@@ -1,0 +1,19 @@
+# Kinyarwanda TTS — training corpus cleaning (NOT FLEURS).
+# Source files under kinyarwanda_tts/ are never overwritten.
+
+data_root: /project/community/rmwisene/datasets/kinyarwanda_tts
+metadata: tts-dataset.csv
+audio_dir: audio
+
+cleaning:
+  min_chars: 1
+  max_chars: 2000
+  min_duration_s: 0.3
+  max_duration_s: 30.0
+  drop_missing_audio: true
+  normalize_unicode_nfc: true
+  collapse_whitespace: true
+  lowercase: true
+
+output:
+  dir: /project/community/rmwisene/tts_data_cleaning/kinyarwanda

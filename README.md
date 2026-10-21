@@ -143,20 +143,11 @@ export BASELINES=/project/community/rmwisene/tts_baselines
 bash scripts/download_baselines.sh
 ```
 
-### Smoke-test MMS-TTS Kin
-
-```bash
-export BASELINES=/project/community/rmwisene/tts_baselines
-python scripts/smoke_mms_tts_kin.py \
-  --text "Muraho. Amakuru yawe?" \
-  --out /tmp/mms_tts_kin_smoke.wav
-```
-
 ### Kinya-Flex-TTS note
 
-Weights download with the script (`kinya_flex_tts_base_trained.pt`). Runtime inference uses **DeepKIN** (`FlexKinyaTTS`), not Transformers — wire that up after the weights are local. Speakers: `0` Female1, `1` Female2, `2` Male (24 kHz).
+Weights download with the script (`kinya_flex_tts_base_trained.pt`). Runtime inference uses **DeepKIN** (`FlexKinyaTTS`). Speakers: `0` Female1, `1` Female2, `2` Male (24 kHz).
 
-Dav has no public dedicated baseline yet; later adaptation can init from MMS Kin + `kidawida_cv27`.
+Dav has no public dedicated baseline yet; adaptation can init from MMS Kin + cleaned `kidawida_cv27`.
 
 ## Clean FLEURS for baseline evaluation
 
@@ -165,12 +156,7 @@ Eval data only (`test` + `dev`). **Train split is never written into eval manife
 ```bash
 conda activate healthtts
 cd ~/HealthTTS
-# git pull   # after you push from Mac
 
-# 1) see what's on disk (TSV headers, audio tars)
-python scripts/inspect_fleurs.py
-
-# 2) extract archives + write cleaned manifests
 python scripts/clean_fleurs_eval.py --config configs/fleurs_eval.yaml
 ```
 
