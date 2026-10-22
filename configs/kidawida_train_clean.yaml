@@ -1,0 +1,18 @@
+# Kidaw’ida CV27 — training corpus cleaning (audio + text).
+# Prefers frozen cleaned transcripts when available.
+# Source kidawida_cv27/ is never overwritten.
+
+data_root: /project/community/rmwisene/datasets/kidawida_cv27
+cleaned_transcripts: /project/community/rmwisene/tts_data_cleaning/kidawida_cleaned_transcripts.csv
+
+cleaning:
+  min_chars: 1
+  max_chars: 2000
+  min_duration_s: 0.3
+  max_duration_s: 30.0
+  drop_missing_audio: true
+  # Keep flagged q/x/ä/~ rows; do not auto-delete
+  keep_flagged: true
+
+output:
+  dir: /project/community/rmwisene/tts_data_cleaning/kidawida

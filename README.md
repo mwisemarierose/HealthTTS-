@@ -30,7 +30,7 @@ Data lives under project storage, **not** in this repo / not under home:
 
 ```bash
 export DATA=/project/community/rmwisene/datasets
-mkdir -p "$DATA"/{kinyarwanda_tts,kidawida_cv27,fleurs_kinyarwanda}
+mkdir -p "$DATA"/{kinyarwanda_tts,kidawida_cv27,fleurs_kinyarwanda,kinyarwanda_pastor_uwambaje}
 # or: bash scripts/setup_orchard_dirs.sh
 ```
 
@@ -38,16 +38,17 @@ Expected data layout after downloads:
 
 ```text
 /project/community/rmwisene/datasets/
-├── kinyarwanda_tts/       # train/adapt  (HF: mbazaNLP/kinyarwanda-tts-dataset)
-├── kidawida_cv27/         # train/adapt  (Mozilla Data Collective)
-└── fleurs_kinyarwanda/    # baseline eval only (HF: mbazaNLP/fleurs-kinyarwanda)
+├── kinyarwanda_tts/              # mbaza TTS (HF: mbazaNLP/kinyarwanda-tts-dataset)
+├── kinyarwanda_pastor_uwambaje/  # Pastor Uwambaje (HF: vysakh25/kinyarwanda-pastor-snac)
+├── kidawida_cv27/                # train/adapt (Mozilla Data Collective)
+└── fleurs_kinyarwanda/           # baseline eval only (HF: mbazaNLP/fleurs-kinyarwanda)
 ```
 
 ## Data roles (fixed)
 
 | Dataset | Role | Notes |
 |---------|------|--------|
-| `kinyarwanda_tts` | **Train / adapt** (Kin) | No official splits — optional fixed held-out (e.g. 90/10, seed=42) for training checks only |
+| `kinyarwanda_tts` + `kinyarwanda_pastor_uwambaje` | **Train / adapt** (Kin pool) | Merge via `prepare_kinyarwanda_tts_corpus.py` (Pastor STOI≥0.90); one shared train/dev/test |
 | `kidawida_cv27` | **Train / adapt** (Dav) | Use CV `train` / `dev` / `test` |
 | `fleurs_kinyarwanda` | **Baseline evaluation only** (Kin) | Do **not** train or adapt on this set |
 
@@ -75,7 +76,31 @@ hf download mbazaNLP/kinyarwanda-tts-dataset \
   --local-dir "$DATA/kinyarwanda_tts"
 ```
 
-### 2) Kidaw’ida — Mozilla Data Collective (not Hugging Face)
+### 2) Pastor Uwambaje Kinyarwanda (Hugging Face)
+
+```bash
+export DATA=/project/community/rmwisene/datasets
+export HF_HOME=/project/community/rmwisene/.cache/huggingface
+hf download vysakh25/kinyarwanda-pastor-snac \
+  --repo-type dataset \
+  --local-dir "$DATA/kinyarwanda_pastor_uwambaje"
+```
+
+### 3) Merge Kin training pool (Pastor STOI≥0.90 + mbaza)
+
+16 kHz mono WAV copies; **no lowercasing**; one reproducible split for Flex + MMS:
+
+```bash
+conda activate healthtts
+pip install -q datasets soundfile pyyaml librosa   # librosa optional but faster resample
+python scripts/prepare_kinyarwanda_tts_corpus.py
+# smoke: python scripts/prepare_kinyarwanda_tts_corpus.py --limit 50
+```
+
+Outputs under `/project/community/rmwisene/tts_data_cleaning/kinyarwanda_tts_merged/`  
+(`manifests/train.csv|dev.csv|test.csv`, stats, rejected, Pastor review sample).
+
+### 4) Kidaw’ida — Mozilla Data Collective (not Hugging Face)
 
 ```bash
 export MDC_API_KEY='YOUR_API_KEY'   # never commit
@@ -96,7 +121,7 @@ tar -xzf common-voice-scripted-speech-27-0-kidaw-69655f89.tar.gz
 
 Or: `MDC_API_KEY=... bash scripts/download_kidawida_mdc.sh`
 
-### 3) FLEURS Kinyarwanda — eval only (Hugging Face)
+### 5) FLEURS Kinyarwanda — eval only (Hugging Face)
 
 ```bash
 hf download mbazaNLP/fleurs-kinyarwanda \

@@ -1,0 +1,49 @@
+# Merge Pastor Uwambaje (STOI>=0.90) + mbaza TTS into one Kin training pool.
+# Raw datasets are never overwritten. Same split used later for Flex + MMS.
+
+pastor:
+  # HF snapshot on Orchard (hf download → local-dir)
+  local_dir: /project/community/rmwisene/datasets/kinyarwanda_pastor_uwambaje
+  hf_id: vysakh25/kinyarwanda-pastor-snac
+  min_squim_stoi: 0.90
+  speaker_id: pastor_uwambaje
+  source: pastor_uwambaje
+
+mbaza:
+  data_root: /project/community/rmwisene/datasets/kinyarwanda_tts
+  metadata: tts-dataset.csv
+  audio_dir: audio
+  speaker_id: mbaza_spk0
+  source: mbaza_tts
+
+audio:
+  sample_rate: 16000
+  mono: true
+  format: wav
+
+cleaning:
+  min_chars: 1
+  max_chars: 2000
+  min_duration_s: 0.3
+  max_duration_s: 30.0
+  # Mild text only — do NOT lowercase; keep useful Kin punctuation
+  normalize_unicode_nfc: true
+  collapse_whitespace: true
+  lowercase: false
+  drop_empty_text: true
+  drop_duplicate_text: true   # within merged pool (keep first)
+
+split:
+  seed: 42
+  train_ratio: 0.90
+  dev_ratio: 0.05
+  test_ratio: 0.05
+  # Stratify by source so both speakers appear in each split when possible
+  stratify_by_source: true
+
+review:
+  n_pastor_samples: 100
+  seed: 42
+
+output:
+  dir: /project/community/rmwisene/tts_data_cleaning/kinyarwanda_tts_merged
