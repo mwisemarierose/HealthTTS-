@@ -3,7 +3,7 @@
 
 Order:
   1) Load Pastor  2) Filter/clean  3) Load mbaza  4) Clean/standardize
-  5) Merge  6) QC (dupes / bad text / audio)  7) train/dev/test split
+  5) Merge  6) QC (identical-audio dupes / bad text / duration)  7) train/dev/test split
   8) Same manifests for Kinya-Flex and MMS-TTS-Kin
 
 Does NOT modify raw datasets. Audio copies written under output/audio/.
@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import re
 import unicodedata
@@ -248,6 +249,35 @@ def reject(rows: list[dict], reason: str, rejected: list[dict], extra: dict | No
         if extra:
             item.update(extra)
         rejected.append(item)
+
+
+def audio_content_hash(path: Path, chunk: int = 1 << 20) -> str | None:
+    """MD5 of audio file bytes — identical copies only, not similar speech."""
+    try:
+        h = hashlib.md5()
+        with Path(path).open("rb") as f:
+            while True:
+                buf = f.read(chunk)
+                if not buf:
+                    break
+                h.update(buf)
+        return h.hexdigest()
+    except Exception:
+        return None
+
+
+def count_text_duplicates(rows: list[dict], clean_cfg: dict) -> dict:
+    """Report repeated transcripts without dropping them."""
+    counts: Counter[str] = Counter()
+    for r in rows:
+        counts[mild_text(r.get("text") or "", clean_cfg)] += 1
+    n_dup_rows = sum(c - 1 for c in counts.values() if c > 1)
+    n_dup_keys = sum(1 for c in counts.values() if c > 1)
+    return {
+        "n_unique_texts": len(counts),
+        "n_texts_with_repeats": n_dup_keys,
+        "n_extra_rows_same_text": n_dup_rows,
+    }
 
 
 def stratified_split(
@@ -620,21 +650,51 @@ def main() -> None:
     # ------------------------------------------------------------------
     print("=== 5/6 Merge + QC ===")
     pool = pastor_rows + mbaza_rows
-    print(f"  pool before dedupe: {len(pool)}")
+    print(f"  pool before audio dedupe: {len(pool)}")
 
-    if clean_cfg.get("drop_duplicate_text", True):
+    text_dup_stats = count_text_duplicates(pool, clean_cfg)
+    print(
+        "  text repeats (kept): "
+        f"{text_dup_stats['n_texts_with_repeats']} texts × "
+        f"+{text_dup_stats['n_extra_rows_same_text']} rows"
+    )
+
+    # Optional / discouraged: drop on text alone (default off — TTS repeats are useful)
+    if clean_cfg.get("drop_duplicate_text", False):
         seen: set[str] = set()
         deduped = []
         for r in pool:
             key = mild_text(r["text"], clean_cfg)
-            # case-sensitive key (we preserve case)
             if key in seen:
                 reject([r], "duplicate_text", rejected)
                 continue
             seen.add(key)
             deduped.append(r)
         pool = deduped
-        print(f"  after text dedupe: {len(pool)}")
+        print(f"  after text dedupe (enabled): {len(pool)}")
+
+    # Drop only when audio bytes are identical (true copies / clear redundancy)
+    if clean_cfg.get("drop_duplicate_audio", True):
+        seen_hash: set[str] = set()
+        deduped = []
+        n_unhashed = 0
+        for r in pool:
+            digest = audio_content_hash(Path(r["audio_path"]))
+            if digest is None:
+                n_unhashed += 1
+                deduped.append(r)
+                continue
+            if digest in seen_hash:
+                reject([r], "duplicate_audio", rejected, extra={"audio_md5": digest})
+                continue
+            seen_hash.add(digest)
+            deduped.append(r)
+        n_dropped = len(pool) - len(deduped)
+        pool = deduped
+        print(
+            f"  after audio dedupe: {len(pool)}  "
+            f"(dropped={n_dropped}, unreadable_hash={n_unhashed})"
+        )
 
     # ------------------------------------------------------------------
     # 7) Split
@@ -659,7 +719,7 @@ def main() -> None:
     # Rejected
     rej_path = out_dir / "rejected.csv"
     with rej_path.open("w", encoding="utf-8", newline="") as f:
-        fields = ["utt_id", "source", "reason", "text", "audio_path", "squim_stoi"]
+        fields = ["utt_id", "source", "reason", "text", "audio_path", "squim_stoi", "audio_md5"]
         w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
         w.writeheader()
         for r in rejected:
@@ -681,6 +741,7 @@ def main() -> None:
         "n_pool": len(pool),
         "pool_hours": round(sum(r["duration"] for r in pool) / 3600.0, 4),
         "by_source": src_stats(pool),
+        "text_duplicate_report": text_dup_stats,
         "splits": {
             k: {
                 "n": len(v),
@@ -695,6 +756,7 @@ def main() -> None:
         "cleaning": clean_cfg,
         "note": (
             "Raw Pastor/mbaza datasets were not modified. "
+            "Duplicate text is kept by default; only identical audio bytes are dropped. "
             "Use manifests/train.csv|dev.csv|test.csv for both Flex and MMS."
         ),
     }

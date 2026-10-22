@@ -31,7 +31,10 @@ cleaning:
   collapse_whitespace: true
   lowercase: false
   drop_empty_text: true
-  drop_duplicate_text: true   # within merged pool (keep first)
+  # Repeated utterances are valid TTS data — do not drop on text alone.
+  drop_duplicate_text: false
+  # Only drop when audio bytes are identical (true copy / clear redundancy).
+  drop_duplicate_audio: true
 
 split:
   seed: 42

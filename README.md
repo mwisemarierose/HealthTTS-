@@ -100,6 +100,8 @@ python scripts/prepare_kinyarwanda_tts_corpus.py
 Outputs under `/project/community/rmwisene/tts_data_cleaning/kinyarwanda_tts_merged/`  
 (`manifests/train.csv|dev.csv|test.csv`, stats, rejected, Pastor review sample).
 
+QC keeps repeated transcripts (valid TTS repeats). Only identical audio file bytes are dropped (`drop_duplicate_audio`); `drop_duplicate_text` stays off.
+
 ### 4) Kidaw’ida — Mozilla Data Collective (not Hugging Face)
 
 ```bash
