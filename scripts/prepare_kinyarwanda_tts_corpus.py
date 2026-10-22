@@ -118,10 +118,10 @@ def audio_duration(path: Path) -> float | None:
 
 
 def load_pastor_dataset(local_dir: Path, hf_id: str):
+    """Load Pastor split with audio decode disabled (filter STOI first)."""
     from datasets import Audio, load_dataset
 
     local_dir = Path(local_dir)
-    # Prefer local HF snapshot
     if local_dir.is_dir() and any(local_dir.rglob("*.parquet")):
         data_dir = local_dir / "data"
         if data_dir.is_dir():
@@ -135,12 +135,34 @@ def load_pastor_dataset(local_dir: Path, hf_id: str):
     else:
         ds = load_dataset(hf_id)
 
-    # Ensure audio is decoded
     split_name = "train" if "train" in ds else list(ds.keys())[0]
     split = ds[split_name]
+    # Do NOT decode audio while filtering — decoding on full iterate fails / is slow
     if "audio" in split.column_names:
-        split = split.cast_column("audio", Audio(sampling_rate=16000))
+        split = split.cast_column("audio", Audio(sampling_rate=16000, decode=False))
     return split
+
+
+def decode_hf_audio(audio_obj, target_sr: int = 16000):
+    """Decode HF Audio(decode=False) dict → (waveform, sr) or (None, None)."""
+    import io
+
+    if audio_obj is None:
+        return None, None
+    if isinstance(audio_obj, dict):
+        if audio_obj.get("array") is not None:
+            return np.asarray(audio_obj["array"], dtype=np.float32), int(
+                audio_obj.get("sampling_rate") or target_sr
+            )
+        raw = audio_obj.get("bytes")
+        if raw:
+            arr, sr = sf.read(io.BytesIO(raw), always_2d=False)
+            return np.asarray(arr, dtype=np.float32), int(sr)
+        path = audio_obj.get("path")
+        if path and Path(path).is_file():
+            arr, sr = sf.read(str(path), always_2d=False)
+            return np.asarray(arr, dtype=np.float32), int(sr)
+    return None, None
 
 
 def pastor_stats(rows: list[dict]) -> dict:
@@ -312,22 +334,18 @@ def main() -> None:
     print(f"  loaded rows: {len(split)}  columns: {split.column_names}")
 
     min_stoi = float(pastor_cfg["min_squim_stoi"])
+    # Column access avoids decoding audio for every row
+    stoi_col = split["squim_stoi"]
+    text_col = split["text"]
+    dur_col = split["duration"]
+    n_below = 0
     pastor_kept_raw: list[dict] = []
-    for i, row in enumerate(split):
-        stoi = float(row.get("squim_stoi") or 0.0)
-        text_raw = row.get("text") or ""
-        dur = float(row.get("duration") or 0.0)
+    for i in range(len(split)):
+        stoi = float(stoi_col[i] or 0.0)
+        text_raw = text_col[i] or ""
+        dur = float(dur_col[i] or 0.0)
         if stoi < min_stoi:
-            rejected.append(
-                {
-                    "utt_id": f"pastor_{i:06d}",
-                    "source": pastor_cfg["source"],
-                    "reason": f"stoi_below_{min_stoi}",
-                    "text": str(text_raw)[:200],
-                    "audio_path": "",
-                    "squim_stoi": stoi,
-                }
-            )
+            n_below += 1
             continue
         pastor_kept_raw.append(
             {
@@ -336,7 +354,6 @@ def main() -> None:
                 "text_raw": text_raw,
                 "duration_meta": dur,
                 "squim_stoi": stoi,
-                "audio_obj": row.get("audio"),
                 "speaker_id": pastor_cfg["speaker_id"],
                 "source": pastor_cfg["source"],
             }
@@ -344,7 +361,17 @@ def main() -> None:
         if args.limit and len(pastor_kept_raw) >= args.limit:
             break
 
-    print(f"  after STOI>={min_stoi}: {len(pastor_kept_raw)}")
+    print(f"  after STOI>={min_stoi}: {len(pastor_kept_raw)}  (excluded below threshold: {n_below})")
+    rejected.append(
+        {
+            "utt_id": "AGGREGATE",
+            "source": pastor_cfg["source"],
+            "reason": f"stoi_below_{min_stoi}",
+            "text": f"count={n_below}",
+            "audio_path": "",
+            "squim_stoi": "",
+        }
+    )
 
     # Stats on filtered set (pre-export)
     stats_rows = [
@@ -399,7 +426,8 @@ def main() -> None:
     print(f"  review sample: {len(review_idx)} → {review_path}")
 
     pastor_rows: list[dict] = []
-    for r in pastor_kept_raw:
+    print(f"  exporting Pastor audio → {audio_out / 'pastor'} …")
+    for n_done, r in enumerate(pastor_kept_raw, 1):
         text = mild_text(str(r["text_raw"]), clean_cfg)
         if clean_cfg.get("drop_empty_text", True) and not text:
             reject([{"utt_id": r["utt_id"], "source": r["source"], "text": "", "audio_path": ""}], "empty_text", rejected)
@@ -412,11 +440,29 @@ def main() -> None:
             )
             continue
 
-        audio_obj = r["audio_obj"]
-        if audio_obj is None:
+        # Decode audio only for kept rows
+        try:
+            audio_obj = split[r["idx"]]["audio"]
+        except Exception as e:
+            reject(
+                [
+                    {
+                        "utt_id": r["utt_id"],
+                        "source": r["source"],
+                        "text": text,
+                        "audio_path": "",
+                    }
+                ],
+                f"audio_row_error:{type(e).__name__}",
+                rejected,
+            )
+            continue
+
+        arr, sr_in = decode_hf_audio(audio_obj, target_sr=sr_out)
+        if arr is None:
             reject(
                 [{"utt_id": r["utt_id"], "source": r["source"], "text": text, "audio_path": ""}],
-                "missing_audio",
+                "missing_or_undecodable_audio",
                 rejected,
             )
             continue
@@ -425,9 +471,7 @@ def main() -> None:
             out_path = Path(audio_obj["path"])
             dur = audio_duration(out_path) or float(r["duration_meta"])
         else:
-            arr = np.asarray(audio_obj["array"], dtype=np.float32)
-            sr_in = int(audio_obj.get("sampling_rate") or 16000)
-            arr = resample_mono(arr, sr_in, sr_out)
+            arr = resample_mono(arr, int(sr_in or sr_out), sr_out)
             out_path = audio_out / "pastor" / f"{r['utt_id']}.wav"
             dur = write_wav(out_path, arr, sr_out)
 
@@ -456,6 +500,8 @@ def main() -> None:
                 "duration": round(dur, 3),
             }
         )
+        if n_done % 500 == 0 or n_done == len(pastor_kept_raw):
+            print(f"    pastor export {n_done}/{len(pastor_kept_raw)}  kept={len(pastor_rows)}")
 
     print(f"  Pastor usable: {len(pastor_rows)}")
 
