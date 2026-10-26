@@ -1,0 +1,37 @@
+# Kidaw’ida CV27 → training pool (same schema as Kin merge).
+# Uses official CV train/dev/test. Source kidawida_cv27/ is never overwritten.
+
+data_root: /project/community/rmwisene/datasets/kidawida_cv27
+cleaned_transcripts: /project/community/rmwisene/tts_data_cleaning/kidawida_cleaned_transcripts.csv
+
+# Prefer these basenames under data_root (Common Voice layout)
+split_files:
+  train: train.tsv
+  dev: dev.tsv
+  test: test.tsv
+
+audio:
+  sample_rate: 16000
+  mono: true
+  format: wav
+
+cleaning:
+  min_chars: 1
+  max_chars: 2000
+  min_duration_s: 0.3
+  max_duration_s: 30.0
+  # Frozen cleaned_text is already lowercased; do not re-case here
+  normalize_unicode_nfc: true
+  collapse_whitespace: true
+  lowercase: false
+  drop_empty_text: true
+  keep_flagged: true
+  # Repeated utterances are valid TTS data
+  drop_duplicate_text: false
+  # Only drop identical audio bytes
+  drop_duplicate_audio: true
+
+output:
+  dir: /project/community/rmwisene/tts_data_cleaning/kidawida_tts_prepared
+  source: kidawida_cv27
+  default_speaker: dav_spk_unknown

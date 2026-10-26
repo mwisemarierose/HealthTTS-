@@ -49,7 +49,7 @@ Expected data layout after downloads:
 | Dataset | Role | Notes |
 |---------|------|--------|
 | `kinyarwanda_tts` + `kinyarwanda_pastor_uwambaje` | **Train / adapt** (Kin pool) | Merge via `prepare_kinyarwanda_tts_corpus.py` (Pastor STOI≥0.90); one shared train/dev/test |
-| `kidawida_cv27` | **Train / adapt** (Dav) | Use CV `train` / `dev` / `test` |
+| `kidawida_cv27` | **Train / adapt** (Dav) | Prepare via `prepare_kidawida_tts_corpus.py` (frozen cleaned text + CV splits) |
 | `fleurs_kinyarwanda` | **Baseline evaluation only** (Kin) | Do **not** train or adapt on this set |
 
 Nothing changes: **FLEURS stays baseline evaluation** for Kinyarwanda.
@@ -122,6 +122,27 @@ tar -xzf common-voice-scripted-speech-27-0-kidaw-69655f89.tar.gz
 ```
 
 Or: `MDC_API_KEY=... bash scripts/download_kidawida_mdc.sh`
+
+### 4b) Prepare Dav training pool (CV train/dev/test)
+
+Requires frozen cleaned transcripts first (audit + freeze, if not already done):
+
+```bash
+conda activate healthtts
+cd ~/HealthTTS
+# once:
+# python scripts/audit_clean_kidawida_transcripts.py
+# python scripts/freeze_cleaned_kidawida.py
+
+pip install -q soundfile pyyaml librosa   # librosa helps with CV mp3
+python scripts/prepare_kidawida_tts_corpus.py
+# smoke: python scripts/prepare_kidawida_tts_corpus.py --limit 50
+```
+
+Outputs under `/project/community/rmwisene/tts_data_cleaning/kidawida_tts_prepared/`  
+(`manifests/train.csv|dev.csv|test.csv`, 16 kHz WAV under `audio/`, stats, rejected).
+
+Keeps official CV splits and repeated transcripts; only identical audio bytes are dropped. Flagged q/x/ä/~ rows stay in unless you change the config.
 
 ### 5) FLEURS Kinyarwanda — eval only (Hugging Face)
 
