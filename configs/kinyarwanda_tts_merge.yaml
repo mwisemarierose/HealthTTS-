@@ -1,5 +1,13 @@
 # Merge mbaza + AfriSpeak Female + AfriSpeak Male into one Kin training pool.
-# No Pastor. Raw datasets are never overwritten. Same split for Flex + MMS.
+# No Pastor. Raw datasets are never overwritten.
+#
+# Split policy:
+#   - AfriSpeak: keep official train / val / test manifests unchanged
+#   - mbaza: create reproducible train/dev/test (no official split)
+#   - Combined:
+#       train = mbaza_train + AfriSpeak♂_train + AfriSpeak♀_train
+#       dev   = mbaza_dev   + AfriSpeak♂_val   + AfriSpeak♀_val
+#       test  = mbaza_test  + AfriSpeak♂_test  + AfriSpeak♀_test
 
 mbaza:
   data_root: /project/community/rmwisene/datasets/kinyarwanda_tts
@@ -12,10 +20,11 @@ afrispeak_female:
   data_root: /project/community/rmwisene/datasets/afrispeak_kinyarwanda_female
   hf_id: DigitalUmuganda/afrispeak_kinyarwanda_female_tts_dataset
   audio_dir: audio
+  # official split name → manifest file
   manifests:
-    - train_manifest.tsv
-    - val_manifest.tsv
-    - test_manifest.tsv
+    train: train_manifest.tsv
+    dev: val_manifest.tsv
+    test: test_manifest.tsv
   speaker_id: afrispeak_female
   source: afrispeak_female
 
@@ -24,9 +33,9 @@ afrispeak_male:
   hf_id: DigitalUmuganda/afrispeak_kinyarwanda_male_tts_dataset
   audio_dir: audio
   manifests:
-    - train_manifest.tsv
-    - val_manifest.tsv
-    - test_manifest.tsv
+    train: train_manifest.tsv
+    dev: val_manifest.tsv
+    test: test_manifest.tsv
   speaker_id: afrispeak_male
   source: afrispeak_male
 
@@ -40,22 +49,19 @@ cleaning:
   max_chars: 2000
   min_duration_s: 0.3
   max_duration_s: 30.0
-  # Mild text only — do NOT lowercase; keep useful Kin punctuation
   normalize_unicode_nfc: true
   collapse_whitespace: true
   lowercase: false
   drop_empty_text: true
-  # Repeated utterances are valid TTS data — do not drop on text alone.
   drop_duplicate_text: false
-  # Only drop when audio bytes are identical (true copy / clear redundancy).
   drop_duplicate_audio: true
 
-split:
+# Only applied to mbaza (AfriSpeak splits stay official)
+mbaza_split:
   seed: 42
   train_ratio: 0.90
   dev_ratio: 0.05
   test_ratio: 0.05
-  stratify_by_source: true
 
 review:
   n_samples_per_source: 50

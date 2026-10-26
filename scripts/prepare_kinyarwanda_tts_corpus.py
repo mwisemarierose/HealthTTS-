@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Prepare merged Kinyarwanda TTS corpus: mbaza + AfriSpeak Female + Male.
 
-Order:
-  1) Load mbaza  2) Load AfriSpeak F/M  3) Mild text + 16 kHz export
-  4) Merge  5) QC (identical-audio only)  6) stratified train/dev/test
-  7) Same manifests for Kinya-Flex and MMS-TTS-Kin
+Split policy:
+  - AfriSpeak: keep official train / val(=dev) / test
+  - mbaza: create reproducible train/dev/test (seed in config)
+  - Combined train/dev/test = union across sources
 
 Does NOT modify raw datasets. Audio copies under output/audio/.
 
@@ -58,7 +58,8 @@ QUOTE_MAP = {
 }
 WS_RE = re.compile(r"\s+")
 LINE_QUOTED = re.compile(r'^\s*(\S+)\s+"(.*)"\s*$')
-SCHEMA = ("utt_id", "audio_path", "text", "speaker_id", "source", "duration")
+SCHEMA = ("utt_id", "audio_path", "text", "speaker_id", "source", "duration", "split")
+SPLIT_ORDER = {"train": 0, "dev": 1, "test": 2}
 
 
 def load_config(path: Path) -> dict:
@@ -128,6 +129,7 @@ def reject(rows: list[dict], reason: str, rejected: list[dict], extra: dict | No
         item = {
             "utt_id": r.get("utt_id", ""),
             "source": r.get("source", ""),
+            "split": r.get("split", ""),
             "reason": reason,
             "text": (r.get("text") or "")[:200],
             "audio_path": r.get("audio_path", ""),
@@ -162,42 +164,31 @@ def count_text_duplicates(rows: list[dict], clean_cfg: dict) -> dict:
     }
 
 
-def stratified_split(
-    rows: list[dict], seed: int, train_r: float, dev_r: float, test_r: float, stratify: bool
+def split_mbaza(
+    rows: list[dict], seed: int, train_r: float, dev_r: float, test_r: float
 ) -> dict[str, list[dict]]:
+    """Reproducible mbaza-only split (AfriSpeak is not passed here)."""
     assert abs(train_r + dev_r + test_r - 1.0) < 1e-6
     rng = np.random.default_rng(seed)
-
-    def split_group(group: list[dict]) -> dict[str, list[dict]]:
-        idx = np.arange(len(group))
-        rng.shuffle(idx)
-        n = len(group)
-        n_test = max(1, int(round(n * test_r))) if n >= 20 else max(0, int(n * test_r))
-        n_dev = max(1, int(round(n * dev_r))) if n >= 20 else max(0, int(n * dev_r))
-        if n_test + n_dev >= n:
-            n_test = max(0, n // 10)
-            n_dev = max(0, n // 10)
-        n_train = n - n_dev - n_test
-        order = idx.tolist()
-        return {
-            "train": [group[i] for i in order[:n_train]],
-            "dev": [group[i] for i in order[n_train : n_train + n_dev]],
-            "test": [group[i] for i in order[n_train + n_dev :]],
-        }
-
-    if stratify:
-        by_src: dict[str, list[dict]] = {}
-        for r in rows:
-            by_src.setdefault(r["source"], []).append(r)
-        out = {"train": [], "dev": [], "test": []}
-        for group in by_src.values():
-            part = split_group(group)
-            for k in out:
-                out[k].extend(part[k])
-        for k in out:
-            rng.shuffle(out[k])
-        return out
-    return split_group(rows)
+    idx = np.arange(len(rows))
+    rng.shuffle(idx)
+    n = len(rows)
+    n_test = max(1, int(round(n * test_r))) if n >= 20 else max(0, int(n * test_r))
+    n_dev = max(1, int(round(n * dev_r))) if n >= 20 else max(0, int(n * dev_r))
+    if n_test + n_dev >= n:
+        n_test = max(0, n // 10)
+        n_dev = max(0, n // 10)
+    n_train = n - n_dev - n_test
+    order = idx.tolist()
+    out = {
+        "train": [rows[i] for i in order[:n_train]],
+        "dev": [rows[i] for i in order[n_train : n_train + n_dev]],
+        "test": [rows[i] for i in order[n_train + n_dev :]],
+    }
+    for split_name, group in out.items():
+        for r in group:
+            r["split"] = split_name
+    return out
 
 
 def write_manifest(path: Path, rows: list[dict]) -> None:
@@ -268,45 +259,41 @@ def detect_col(fieldnames: list[str] | None, keys: tuple[str, ...]) -> str | Non
     return None
 
 
-def parse_afrispeak_manifests(root: Path, manifest_names: list[str]) -> list[dict]:
-    """Load AfriSpeak TSV rows: text + audio_name → audio/{id}.wav."""
+def parse_afrispeak_manifest(path: Path, official_split: str) -> list[dict]:
+    """Load one AfriSpeak TSV; tag official_split (train/dev/test)."""
     rows: list[dict] = []
-    seen: set[str] = set()
-    for name in manifest_names:
-        path = root / name
-        if not path.is_file():
-            print(f"  warn: missing manifest {path}")
-            continue
-        with path.open(encoding="utf-8-sig", newline="", errors="replace") as f:
-            sample = f.read(4096)
-            f.seek(0)
-            delim = "\t" if sample.count("\t") >= sample.count(",") else ","
-            reader = csv.DictReader(f, delimiter=delim)
-            fields = list(reader.fieldnames or [])
-            text_col = detect_col(fields, ("text", "sentence", "transcript"))
-            audio_col = detect_col(fields, ("audio_name", "audio", "path", "filename", "wav"))
-            if text_col is None or audio_col is None:
-                raise SystemExit(f"AfriSpeak manifest missing text/audio columns: {path} {fields}")
-            for r in reader:
-                text = (r.get(text_col) or "").strip()
-                audio_name = (r.get(audio_col) or "").strip()
-                if not text or not audio_name:
-                    continue
-                # normalize id (manifest may be int-like)
-                audio_id = str(audio_name).strip()
-                if audio_id.endswith(".wav"):
-                    audio_id = Path(audio_id).stem
-                key = f"{name}::{audio_id}"
-                if key in seen:
-                    continue
-                seen.add(key)
-                rows.append(
-                    {
-                        "id": audio_id,
-                        "original_text": text,
-                        "manifest": name,
-                    }
-                )
+    if not path.is_file():
+        print(f"  warn: missing manifest {path}")
+        return rows
+    with path.open(encoding="utf-8-sig", newline="", errors="replace") as f:
+        sample = f.read(4096)
+        f.seek(0)
+        delim = "\t" if sample.count("\t") >= sample.count(",") else ","
+        reader = csv.DictReader(f, delimiter=delim)
+        fields = list(reader.fieldnames or [])
+        text_col = detect_col(fields, ("text", "sentence", "transcript"))
+        audio_col = detect_col(fields, ("audio_name", "audio", "path", "filename", "wav"))
+        if text_col is None or audio_col is None:
+            raise SystemExit(f"AfriSpeak manifest missing text/audio columns: {path} {fields}")
+        seen: set[str] = set()
+        for r in reader:
+            text = (r.get(text_col) or "").strip()
+            audio_name = (r.get(audio_col) or "").strip()
+            if not text or not audio_name:
+                continue
+            audio_id = str(audio_name).strip()
+            if audio_id.endswith(".wav"):
+                audio_id = Path(audio_id).stem
+            if audio_id in seen:
+                continue
+            seen.add(audio_id)
+            rows.append(
+                {
+                    "id": audio_id,
+                    "original_text": text,
+                    "official_split": official_split,
+                }
+            )
     return rows
 
 
@@ -337,6 +324,7 @@ def export_rows(
     rejected: list[dict],
     skip_audio_export: bool,
     limit: int,
+    default_split: str | None = None,
 ) -> list[dict]:
     kept: list[dict] = []
     for i, item in enumerate(items):
@@ -344,15 +332,20 @@ def export_rows(
             break
         raw_id = str(item["id"])
         safe_id = re.sub(r"[^\w.\-]+", "_", raw_id)
+        split_name = item.get("official_split") or default_split or ""
         utt_id = f"{source}_{safe_id}"
         text = mild_text(item["original_text"], clean_cfg)
 
         if clean_cfg.get("drop_empty_text", True) and not text:
-            reject([{"utt_id": utt_id, "source": source, "text": "", "audio_path": ""}], "empty_text", rejected)
+            reject(
+                [{"utt_id": utt_id, "source": source, "split": split_name, "text": "", "audio_path": ""}],
+                "empty_text",
+                rejected,
+            )
             continue
         if len(text) < int(clean_cfg["min_chars"]) or len(text) > int(clean_cfg["max_chars"]):
             reject(
-                [{"utt_id": utt_id, "source": source, "text": text, "audio_path": ""}],
+                [{"utt_id": utt_id, "source": source, "split": split_name, "text": text, "audio_path": ""}],
                 "text_length",
                 rejected,
             )
@@ -361,7 +354,7 @@ def export_rows(
         src_audio = resolve_fn(raw_id)
         if src_audio is None:
             reject(
-                [{"utt_id": utt_id, "source": source, "text": text, "audio_path": ""}],
+                [{"utt_id": utt_id, "source": source, "split": split_name, "text": text, "audio_path": ""}],
                 "missing_audio",
                 rejected,
             )
@@ -370,7 +363,15 @@ def export_rows(
         arr, sr_in = read_audio(src_audio)
         if arr is None or not sr_in:
             reject(
-                [{"utt_id": utt_id, "source": source, "text": text, "audio_path": str(src_audio)}],
+                [
+                    {
+                        "utt_id": utt_id,
+                        "source": source,
+                        "split": split_name,
+                        "text": text,
+                        "audio_path": str(src_audio),
+                    }
+                ],
                 "unreadable_audio",
                 rejected,
             )
@@ -386,7 +387,15 @@ def export_rows(
 
         if dur < float(clean_cfg["min_duration_s"]) or dur > float(clean_cfg["max_duration_s"]):
             reject(
-                [{"utt_id": utt_id, "source": source, "text": text, "audio_path": str(out_path)}],
+                [
+                    {
+                        "utt_id": utt_id,
+                        "source": source,
+                        "split": split_name,
+                        "text": text,
+                        "audio_path": str(out_path),
+                    }
+                ],
                 "duration_out_of_range",
                 rejected,
             )
@@ -400,6 +409,7 @@ def export_rows(
                 "speaker_id": speaker_id,
                 "source": source,
                 "duration": round(float(dur), 3),
+                "split": split_name,
             }
         )
         if (i + 1) % 500 == 0:
@@ -415,21 +425,28 @@ def write_review_sample(path: Path, rows: list[dict], n: int, seed: int) -> None
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as f:
         w = csv.DictWriter(
-            f, fieldnames=["utt_id", "text", "duration", "speaker_id", "source", "audio_path"]
+            f,
+            fieldnames=["utt_id", "text", "duration", "speaker_id", "source", "split", "audio_path"],
         )
         w.writeheader()
         for j in idx:
             r = rows[j]
-            w.writerow(
-                {
-                    "utt_id": r["utt_id"],
-                    "text": r["text"],
-                    "duration": r["duration"],
-                    "speaker_id": r["speaker_id"],
-                    "source": r["source"],
-                    "audio_path": r["audio_path"],
-                }
-            )
+            w.writerow({k: r.get(k, "") for k in w.fieldnames})
+
+
+def src_stats(rows: list[dict]) -> dict:
+    by: dict[str, dict] = {}
+    for r in rows:
+        by.setdefault(r["source"], {"n": 0, "duration_s": 0.0})
+        by[r["source"]]["n"] += 1
+        by[r["source"]]["duration_s"] += float(r["duration"])
+    for v in by.values():
+        v["duration_hours"] = round(v["duration_s"] / 3600.0, 4)
+    return by
+
+
+def hours(rows: list[dict]) -> float:
+    return round(sum(float(r["duration"]) for r in rows) / 3600.0, 4)
 
 
 def main() -> None:
@@ -459,12 +476,11 @@ def main() -> None:
     clean_cfg = cfg["cleaning"]
     sr_out = int(cfg["audio"]["sample_rate"])
     rejected: list[dict] = []
-    pool_parts: list[dict] = []
 
     # ------------------------------------------------------------------
-    # 1) mbaza
+    # 1) mbaza → export → our train/dev/test
     # ------------------------------------------------------------------
-    print("=== 1/3 mbaza TTS ===")
+    print("=== 1/3 mbaza TTS (custom split) ===")
     mbaza_cfg = cfg["mbaza"]
     root = Path(mbaza_cfg["data_root"])
     meta = root / mbaza_cfg["metadata"]
@@ -485,16 +501,28 @@ def main() -> None:
         rejected=rejected,
         skip_audio_export=args.skip_audio_export,
         limit=args.limit,
+        default_split="",  # filled by split_mbaza
     )
     print(f"  mbaza usable: {len(mbaza_rows)}")
-    pool_parts.extend(mbaza_rows)
+
+    msp = cfg["mbaza_split"]
+    mbaza_splits = split_mbaza(
+        mbaza_rows,
+        seed=int(msp["seed"]),
+        train_r=float(msp["train_ratio"]),
+        dev_r=float(msp["dev_ratio"]),
+        test_r=float(msp["test_ratio"]),
+    )
+    for sn, rows in mbaza_splits.items():
+        print(f"  mbaza {sn}: {len(rows)} / {hours(rows)} h")
 
     # ------------------------------------------------------------------
-    # 2–3) AfriSpeak Female / Male
+    # 2–3) AfriSpeak Female / Male — official splits
     # ------------------------------------------------------------------
+    afrispeak_by_source: dict[str, dict[str, list[dict]]] = {}
     for key, label in (
-        ("afrispeak_female", "2/3 AfriSpeak Female"),
-        ("afrispeak_male", "3/3 AfriSpeak Male"),
+        ("afrispeak_female", "2/3 AfriSpeak Female (official splits)"),
+        ("afrispeak_male", "3/3 AfriSpeak Male (official splits)"),
     ):
         print(f"=== {label} ===")
         acfg = cfg[key]
@@ -506,28 +534,40 @@ def main() -> None:
             )
         aaudio = aroot / acfg.get("audio_dir", "audio")
         aindex = index_audio_dir(aaudio)
-        items = parse_afrispeak_manifests(aroot, list(acfg.get("manifests") or []))
-        print(f"  manifests rows: {len(items)}  audio indexed: {len(set(aindex.values()))}")
-        rows = export_rows(
-            items,
-            source=acfg["source"],
-            speaker_id=acfg["speaker_id"],
-            resolve_fn=lambda uid, idx=aindex, ad=aaudio: resolve_afrispeak_audio(uid, idx, ad),
-            audio_subdir=audio_out / acfg["source"],
-            clean_cfg=clean_cfg,
-            sr_out=sr_out,
-            rejected=rejected,
-            skip_audio_export=args.skip_audio_export,
-            limit=args.limit,
-        )
-        print(f"  {key} usable: {len(rows)}")
-        pool_parts.extend(rows)
+        man_map = acfg.get("manifests") or {}
+        source_splits: dict[str, list[dict]] = {"train": [], "dev": [], "test": []}
+        for split_name, fname in man_map.items():
+            items = parse_afrispeak_manifest(aroot / fname, split_name)
+            if args.limit:
+                items = items[: args.limit]
+            print(f"  {split_name} manifest rows: {len(items)}")
+            rows = export_rows(
+                items,
+                source=acfg["source"],
+                speaker_id=acfg["speaker_id"],
+                resolve_fn=lambda uid, idx=aindex, ad=aaudio: resolve_afrispeak_audio(uid, idx, ad),
+                audio_subdir=audio_out / acfg["source"],
+                clean_cfg=clean_cfg,
+                sr_out=sr_out,
+                rejected=rejected,
+                skip_audio_export=args.skip_audio_export,
+                limit=0,  # already limited above
+            )
+            source_splits[split_name] = rows
+            print(f"  {split_name} usable: {len(rows)} / {hours(rows)} h")
+        afrispeak_by_source[acfg["source"]] = source_splits
 
     # ------------------------------------------------------------------
-    # Merge + QC
+    # Combine by split, then QC (prefer keeping train over dev/test on audio dupes)
     # ------------------------------------------------------------------
-    print("=== Merge + QC ===")
-    pool = list(pool_parts)
+    print("=== Combine + QC ===")
+    combined: dict[str, list[dict]] = {"train": [], "dev": [], "test": []}
+    for sn in ("train", "dev", "test"):
+        combined[sn].extend(mbaza_splits[sn])
+        for src_splits in afrispeak_by_source.values():
+            combined[sn].extend(src_splits.get(sn, []))
+
+    pool = combined["train"] + combined["dev"] + combined["test"]
     print(f"  pool before audio dedupe: {len(pool)}")
     text_dup_stats = count_text_duplicates(pool, clean_cfg)
     print(
@@ -536,40 +576,37 @@ def main() -> None:
         f"+{text_dup_stats['n_extra_rows_same_text']} rows"
     )
 
-    if clean_cfg.get("drop_duplicate_text", False):
-        seen: set[str] = set()
-        deduped = []
-        for r in pool:
-            key = mild_text(r["text"], clean_cfg)
-            if key in seen:
-                reject([r], "duplicate_text", rejected)
-                continue
-            seen.add(key)
-            deduped.append(r)
-        pool = deduped
-        print(f"  after text dedupe (enabled): {len(pool)}")
-
     if clean_cfg.get("drop_duplicate_audio", True):
+        # Prefer train > dev > test when identical bytes collide
+        ordered = sorted(pool, key=lambda r: SPLIT_ORDER.get(r.get("split", "test"), 9))
         seen_hash: set[str] = set()
-        deduped = []
-        n_unhashed = 0
-        for r in pool:
+        keep_ids: set[str] = set()
+        n_dropped = 0
+        for r in ordered:
             digest = audio_content_hash(Path(r["audio_path"]))
             if digest is None:
-                n_unhashed += 1
-                deduped.append(r)
+                keep_ids.add(r["utt_id"])
                 continue
             if digest in seen_hash:
                 reject([r], "duplicate_audio", rejected, extra={"audio_md5": digest})
+                n_dropped += 1
                 continue
             seen_hash.add(digest)
-            deduped.append(r)
-        n_dropped = len(pool) - len(deduped)
-        pool = deduped
-        print(
-            f"  after audio dedupe: {len(pool)}  "
-            f"(dropped={n_dropped}, unreadable_hash={n_unhashed})"
-        )
+            keep_ids.add(r["utt_id"])
+        for sn in combined:
+            combined[sn] = [r for r in combined[sn] if r["utt_id"] in keep_ids]
+        pool = combined["train"] + combined["dev"] + combined["test"]
+        print(f"  after audio dedupe: {len(pool)}  (dropped={n_dropped})")
+
+    # Per-source test slices (for separate reporting)
+    test_by_source = {
+        "mbaza_tts": list(mbaza_splits["test"]),
+        **{src: list(sp["test"]) for src, sp in afrispeak_by_source.items()},
+    }
+    # re-filter after dedupe
+    keep_ids = {r["utt_id"] for r in pool}
+    for src in test_by_source:
+        test_by_source[src] = [r for r in test_by_source[src] if r["utt_id"] in keep_ids]
 
     # Review samples
     review_n = int(cfg.get("review", {}).get("n_samples_per_source", 50))
@@ -578,67 +615,66 @@ def main() -> None:
     for r in pool:
         by_src.setdefault(r["source"], []).append(r)
     for src, rows in by_src.items():
-        write_review_sample(
-            out_dir / f"review_{src}.csv", rows, review_n, review_seed
-        )
+        write_review_sample(out_dir / f"review_{src}.csv", rows, review_n, review_seed)
         print(f"  review sample {src}: {min(review_n, len(rows))} → review_{src}.csv")
 
-    # Split
-    print("=== Split ===")
-    sp = cfg["split"]
-    splits = stratified_split(
-        pool,
-        seed=int(sp["seed"]),
-        train_r=float(sp["train_ratio"]),
-        dev_r=float(sp["dev_ratio"]),
-        test_r=float(sp["test_ratio"]),
-        stratify=bool(sp.get("stratify_by_source", True)),
-    )
-    for name, rows in splits.items():
-        write_manifest(man_dir / f"{name}.csv", rows)
-        hours = sum(float(r["duration"]) for r in rows) / 3600.0
-        print(f"  {name}: {len(rows)} clips, {hours:.3f} h")
+    # ------------------------------------------------------------------
+    # Write manifests
+    # ------------------------------------------------------------------
+    print("=== Manifests ===")
+    for sn in ("train", "dev", "test"):
+        write_manifest(man_dir / f"{sn}.csv", combined[sn])
+        print(
+            f"  {sn}: {len(combined[sn])} clips, {hours(combined[sn])} h  "
+            f"{src_stats(combined[sn])}"
+        )
     write_manifest(man_dir / "all.csv", pool)
+    write_manifest(man_dir / "test_mbaza.csv", test_by_source.get("mbaza_tts", []))
+    write_manifest(
+        man_dir / "test_afrispeak_female.csv", test_by_source.get("afrispeak_female", [])
+    )
+    write_manifest(
+        man_dir / "test_afrispeak_male.csv", test_by_source.get("afrispeak_male", [])
+    )
+    write_manifest(man_dir / "test_kin_combined.csv", combined["test"])  # alias of test.csv
+    print("  also wrote test_mbaza / test_afrispeak_female / test_afrispeak_male / test_kin_combined")
 
     rej_path = out_dir / "rejected.csv"
     with rej_path.open("w", encoding="utf-8", newline="") as f:
-        fields = ["utt_id", "source", "reason", "text", "audio_path", "audio_md5"]
+        fields = ["utt_id", "source", "split", "reason", "text", "audio_path", "audio_md5"]
         w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
         w.writeheader()
         for r in rejected:
             w.writerow(r)
 
-    def src_stats(rows: list[dict]) -> dict:
-        by: dict[str, dict] = {}
-        for r in rows:
-            by.setdefault(r["source"], {"n": 0, "duration_s": 0.0})
-            by[r["source"]]["n"] += 1
-            by[r["source"]]["duration_s"] += float(r["duration"])
-        for v in by.values():
-            v["duration_hours"] = round(v["duration_s"] / 3600.0, 4)
-        return by
-
     all_stats = {
         "n_pool": len(pool),
-        "pool_hours": round(sum(float(r["duration"]) for r in pool) / 3600.0, 4),
+        "pool_hours": hours(pool),
         "by_source": src_stats(pool),
         "text_duplicate_report": text_dup_stats,
+        "split_policy": {
+            "afrispeak": "official train/val/test manifests (val→dev)",
+            "mbaza": "reproducible custom split",
+            "mbaza_split": msp,
+        },
         "splits": {
             k: {
                 "n": len(v),
-                "hours": round(sum(float(r["duration"]) for r in v) / 3600.0, 4),
+                "hours": hours(v),
                 "by_source": src_stats(v),
             }
-            for k, v in splits.items()
+            for k, v in combined.items()
+        },
+        "test_by_source": {
+            k: {"n": len(v), "hours": hours(v)} for k, v in test_by_source.items()
         },
         "n_rejected": len(rejected),
         "reject_reasons": dict(Counter(r["reason"] for r in rejected)),
         "audio": cfg["audio"],
         "cleaning": clean_cfg,
         "note": (
-            "mbaza + AfriSpeak Female + AfriSpeak Male. No Pastor. "
-            "Duplicate text kept; only identical audio bytes dropped. "
-            "Use manifests for both Flex and MMS."
+            "Train on train.csv; tune on dev.csv; evaluate each test_*.csv then "
+            "test_kin_combined / test.csv. FLEURS stays external eval. No Pastor."
         ),
     }
     (out_dir / "dataset_statistics.json").write_text(
@@ -647,19 +683,23 @@ def main() -> None:
     (out_dir / "split_config.json").write_text(
         json.dumps(
             {
-                "seed": sp["seed"],
-                "train_ratio": sp["train_ratio"],
-                "dev_ratio": sp["dev_ratio"],
-                "test_ratio": sp["test_ratio"],
-                "stratify_by_source": sp.get("stratify_by_source", True),
+                "policy": all_stats["split_policy"],
                 "sample_rate": sr_out,
                 "output_dir": str(out_dir),
                 "manifests": {
                     "train": str(man_dir / "train.csv"),
                     "dev": str(man_dir / "dev.csv"),
                     "test": str(man_dir / "test.csv"),
+                    "test_mbaza": str(man_dir / "test_mbaza.csv"),
+                    "test_afrispeak_female": str(man_dir / "test_afrispeak_female.csv"),
+                    "test_afrispeak_male": str(man_dir / "test_afrispeak_male.csv"),
+                    "test_kin_combined": str(man_dir / "test_kin_combined.csv"),
                     "all": str(man_dir / "all.csv"),
                 },
+                "protocol": (
+                    "Train → Dev (select best ckpt) → Test each source → "
+                    "Combine Kin tests → Report (+ FLEURS external)"
+                ),
             },
             indent=2,
         )
@@ -671,19 +711,28 @@ def main() -> None:
         "Kinyarwanda TTS merged corpus (mbaza + AfriSpeak)",
         "=================================================",
         f"Output: {out_dir}",
-        f"Merged pool: {len(pool)} clips / {all_stats['pool_hours']} h",
+        f"Pool: {len(pool)} clips / {all_stats['pool_hours']} h",
         f"Rejected: {len(rejected)}",
         "",
-        "By source:",
+        "Split policy: AfriSpeak official; mbaza custom (seed="
+        f"{msp['seed']}, {msp['train_ratio']}/{msp['dev_ratio']}/{msp['test_ratio']})",
+        "",
+        "By source (all splits):",
     ]
     for src, st in all_stats["by_source"].items():
-        report.append(f"  {src}: {st['n']} clips / {st['duration_hours']} h")
-    report += ["", "Splits:"]
-    for k, v in splits.items():
-        report.append(f"  {k}: {len(v)} / {all_stats['splits'][k]['hours']} h")
+        report.append(f"  {src}: {st['n']} / {st['duration_hours']} h")
+    report += ["", "Combined splits:"]
+    for k in ("train", "dev", "test"):
+        report.append(
+            f"  {k}: {all_stats['splits'][k]['n']} / {all_stats['splits'][k]['hours']} h"
+        )
+    report += ["", "Per-source test:"]
+    for k, st in all_stats["test_by_source"].items():
+        report.append(f"  {k}: {st['n']} / {st['hours']} h")
     report += [
         "",
-        "Use the same manifests for Kinya-Flex and MMS-TTS-Kin.",
+        "Protocol: Train → Dev → best ckpt → test each source → combine Kin test → report.",
+        "FLEURS remains external eval only.",
         "",
     ]
     (out_dir / "prepare_report.txt").write_text("\n".join(report), encoding="utf-8")

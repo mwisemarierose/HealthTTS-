@@ -99,7 +99,11 @@ Expected ~**2.61 h** female + ~**11.47 h** male (+ mbaza ~**6 h** → ~**20 h** 
 
 ### 3) Merge Kin training pool (mbaza + AfriSpeak F/M)
 
-16 kHz mono WAV copies; **no lowercasing**; one reproducible split for Flex + MMS:
+16 kHz mono WAV; **no lowercasing**. Split policy:
+
+- **AfriSpeak:** keep official `train` / `val`→dev / `test`
+- **mbaza:** create reproducible train/dev/test (`seed=42`, 90/5/5)
+- **Combined:** train/dev/test = union of all three sources
 
 ```bash
 conda activate healthtts
@@ -109,10 +113,20 @@ python scripts/prepare_kinyarwanda_tts_corpus.py
 # smoke: python scripts/prepare_kinyarwanda_tts_corpus.py --limit 50
 ```
 
-Outputs under `/project/community/rmwisene/tts_data_cleaning/kinyarwanda_tts_mbaza_afrispeak/`  
-(`manifests/train.csv|dev.csv|test.csv`, stats, rejected, per-source review CSVs).
+Outputs under `/project/community/rmwisene/tts_data_cleaning/kinyarwanda_tts_mbaza_afrispeak/`:
 
-QC keeps repeated transcripts. Only identical audio bytes are dropped.
+```text
+manifests/
+  train.csv dev.csv test.csv          # combined
+  test_mbaza.csv
+  test_afrispeak_female.csv
+  test_afrispeak_male.csv
+  test_kin_combined.csv               # same as test.csv
+  all.csv
+```
+
+Protocol: train → tune on **dev** → best ckpt → score each `test_*.csv` → report combined Kin test (+ **FLEURS** external).  
+QC keeps repeated transcripts; only identical audio bytes are dropped.
 
 ### 4) Kidaw’ida — Mozilla Data Collective (not Hugging Face)
 
