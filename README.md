@@ -101,7 +101,7 @@ Expected ~**2.61 h** female + ~**11.47 h** male (+ mbaza ~**6 h** → ~**20 h** 
 
 16 kHz mono WAV; **no lowercasing**. Split policy:
 
-- **AfriSpeak:** keep official `train` / `val`→dev / `test`
+- **AfriSpeak:** official `train` + `val`→dev. Official test WAVs are **not published** on HF → carve held-out test from train (`female_n=18`, `male_n=100`, `seed=42`)
 - **mbaza:** create reproducible train/dev/test (`seed=42`, 90/5/5)
 - **Combined:** train/dev/test = union of all three sources
 

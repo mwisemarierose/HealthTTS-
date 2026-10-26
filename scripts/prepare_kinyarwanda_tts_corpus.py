@@ -2,7 +2,8 @@
 """Prepare merged Kinyarwanda TTS corpus: mbaza + AfriSpeak Female + Male.
 
 Split policy:
-  - AfriSpeak: keep official train / val(=dev) / test
+  - AfriSpeak: keep official train + val(=dev). Official test WAVs missing on HF
+    → optional held-out test carved from official train (config afrispeak_heldout_test)
   - mbaza: create reproducible train/dev/test (seed in config)
   - Combined train/dev/test = union across sources
 
@@ -189,6 +190,32 @@ def split_mbaza(
         for r in group:
             r["split"] = split_name
     return out
+
+
+def holdout_test_from_train(
+    train_rows: list[dict], n_test: int, seed: int
+) -> tuple[list[dict], list[dict]]:
+    """Carve n_test clips from official AfriSpeak train → (new_train, test)."""
+    if n_test <= 0 or not train_rows:
+        return train_rows, []
+    n_test = min(n_test, max(0, len(train_rows) // 5))  # never take >20% of train
+    if n_test == 0:
+        return train_rows, []
+    rng = np.random.default_rng(seed)
+    idx = np.arange(len(train_rows))
+    rng.shuffle(idx)
+    test_idx = set(idx[:n_test].tolist())
+    test_rows, keep_train = [], []
+    for i, r in enumerate(train_rows):
+        if i in test_idx:
+            r = dict(r)
+            r["split"] = "test"
+            test_rows.append(r)
+        else:
+            r = dict(r)
+            r["split"] = "train"
+            keep_train.append(r)
+    return keep_train, test_rows
 
 
 def write_manifest(path: Path, rows: list[dict]) -> None:
@@ -517,12 +544,20 @@ def main() -> None:
         print(f"  mbaza {sn}: {len(rows)} / {hours(rows)} h")
 
     # ------------------------------------------------------------------
-    # 2–3) AfriSpeak Female / Male — official splits
+    # 2–3) AfriSpeak Female / Male — official train+val; held-out test from train
     # ------------------------------------------------------------------
+    held = cfg.get("afrispeak_heldout_test") or {}
+    held_enabled = bool(held.get("enabled", True))
+    held_seed = int(held.get("seed", 42))
+    held_n = {
+        "afrispeak_female": int(held.get("female_n", 18)),
+        "afrispeak_male": int(held.get("male_n", 100)),
+    }
+
     afrispeak_by_source: dict[str, dict[str, list[dict]]] = {}
     for key, label in (
-        ("afrispeak_female", "2/3 AfriSpeak Female (official splits)"),
-        ("afrispeak_male", "3/3 AfriSpeak Male (official splits)"),
+        ("afrispeak_female", "2/3 AfriSpeak Female"),
+        ("afrispeak_male", "3/3 AfriSpeak Male"),
     ):
         print(f"=== {label} ===")
         acfg = cfg[key]
@@ -534,7 +569,11 @@ def main() -> None:
             )
         aaudio = aroot / acfg.get("audio_dir", "audio")
         aindex = index_audio_dir(aaudio)
-        man_map = acfg.get("manifests") or {}
+        man_map = dict(acfg.get("manifests") or {})
+        # Official test_manifest has no audio on HF — skip unless explicitly listed
+        # and heldout is disabled
+        if held_enabled:
+            man_map.pop("test", None)
         source_splits: dict[str, list[dict]] = {"train": [], "dev": [], "test": []}
         for split_name, fname in man_map.items():
             items = parse_afrispeak_manifest(aroot / fname, split_name)
@@ -551,10 +590,26 @@ def main() -> None:
                 sr_out=sr_out,
                 rejected=rejected,
                 skip_audio_export=args.skip_audio_export,
-                limit=0,  # already limited above
+                limit=0,
             )
             source_splits[split_name] = rows
             print(f"  {split_name} usable: {len(rows)} / {hours(rows)} h")
+
+        if held_enabled:
+            n_hold = held_n.get(acfg["source"], 0)
+            before = len(source_splits["train"])
+            source_splits["train"], source_splits["test"] = holdout_test_from_train(
+                source_splits["train"], n_hold, held_seed
+            )
+            print(
+                f"  held-out test from train: n={len(source_splits['test'])} "
+                f"/ {hours(source_splits['test'])} h  "
+                f"(train {before} → {len(source_splits['train'])})"
+            )
+            print(
+                "  note: official test_manifest WAVs not published; "
+                "this held-out set is for in-domain AfriSpeak test only"
+            )
         afrispeak_by_source[acfg["source"]] = source_splits
 
     # ------------------------------------------------------------------
@@ -653,7 +708,11 @@ def main() -> None:
         "by_source": src_stats(pool),
         "text_duplicate_report": text_dup_stats,
         "split_policy": {
-            "afrispeak": "official train/val/test manifests (val→dev)",
+            "afrispeak": (
+                "official train + val→dev; "
+                "test = held-out from train (official test audio unpublished)"
+            ),
+            "afrispeak_heldout_test": held if held_enabled else None,
             "mbaza": "reproducible custom split",
             "mbaza_split": msp,
         },

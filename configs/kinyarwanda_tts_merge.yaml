@@ -2,12 +2,13 @@
 # No Pastor. Raw datasets are never overwritten.
 #
 # Split policy:
-#   - AfriSpeak: keep official train / val / test manifests unchanged
+#   - AfriSpeak: keep official train + val(=dev). Official test_manifest has NO audio
+#     on HF → carve a small held-out test from official train (see afrispeak_heldout_test).
 #   - mbaza: create reproducible train/dev/test (no official split)
 #   - Combined:
 #       train = mbaza_train + AfriSpeak♂_train + AfriSpeak♀_train
 #       dev   = mbaza_dev   + AfriSpeak♂_val   + AfriSpeak♀_val
-#       test  = mbaza_test  + AfriSpeak♂_test  + AfriSpeak♀_test
+#       test  = mbaza_test  + AfriSpeak♂_heldout_test + AfriSpeak♀_heldout_test
 
 mbaza:
   data_root: /project/community/rmwisene/datasets/kinyarwanda_tts
@@ -20,11 +21,10 @@ afrispeak_female:
   data_root: /project/community/rmwisene/datasets/afrispeak_kinyarwanda_female
   hf_id: DigitalUmuganda/afrispeak_kinyarwanda_female_tts_dataset
   audio_dir: audio
-  # official split name → manifest file
   manifests:
     train: train_manifest.tsv
     dev: val_manifest.tsv
-    test: test_manifest.tsv
+    # test_manifest.tsv exists but WAVs are not published — ignored when heldout enabled
   speaker_id: afrispeak_female
   source: afrispeak_female
 
@@ -35,7 +35,6 @@ afrispeak_male:
   manifests:
     train: train_manifest.tsv
     dev: val_manifest.tsv
-    test: test_manifest.tsv
   speaker_id: afrispeak_male
   source: afrispeak_male
 
@@ -56,12 +55,20 @@ cleaning:
   drop_duplicate_text: false
   drop_duplicate_audio: true
 
-# Only applied to mbaza (AfriSpeak splits stay official)
+# Only applied to mbaza
 mbaza_split:
   seed: 42
   train_ratio: 0.90
   dev_ratio: 0.05
   test_ratio: 0.05
+
+# AfriSpeak official test audio missing → hold out from official train.
+# n matches published test_manifest sizes (18 ♀ / 100 ♂).
+afrispeak_heldout_test:
+  enabled: true
+  seed: 42
+  female_n: 18
+  male_n: 100
 
 review:
   n_samples_per_source: 50
