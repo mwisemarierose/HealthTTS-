@@ -198,7 +198,7 @@ def holdout_test_from_train(
     """Carve n_test clips from official AfriSpeak train → (new_train, test)."""
     if n_test <= 0 or not train_rows:
         return train_rows, []
-    n_test = min(n_test, max(0, len(train_rows) // 5))  # never take >20% of train
+    n_test = min(int(n_test), max(0, len(train_rows) // 5))  # never take >20% of train
     if n_test == 0:
         return train_rows, []
     rng = np.random.default_rng(seed)
@@ -216,6 +216,17 @@ def holdout_test_from_train(
             r["split"] = "train"
             keep_train.append(r)
     return keep_train, test_rows
+
+
+def afrispeak_holdout_n(n_train: int, held_cfg: dict, source: str) -> int:
+    """Resolve held-out test size: optional per-source n, else ratio of train."""
+    key = "female_n" if "female" in source else "male_n" if "male" in source else None
+    if key and held_cfg.get(key) is not None:
+        return int(held_cfg[key])
+    ratio = float(held_cfg.get("ratio", 0.05))
+    if n_train < 20:
+        return max(0, int(n_train * ratio))
+    return max(1, int(round(n_train * ratio)))
 
 
 def write_manifest(path: Path, rows: list[dict]) -> None:
@@ -549,10 +560,6 @@ def main() -> None:
     held = cfg.get("afrispeak_heldout_test") or {}
     held_enabled = bool(held.get("enabled", True))
     held_seed = int(held.get("seed", 42))
-    held_n = {
-        "afrispeak_female": int(held.get("female_n", 18)),
-        "afrispeak_male": int(held.get("male_n", 100)),
-    }
 
     afrispeak_by_source: dict[str, dict[str, list[dict]]] = {}
     for key, label in (
@@ -570,8 +577,7 @@ def main() -> None:
         aaudio = aroot / acfg.get("audio_dir", "audio")
         aindex = index_audio_dir(aaudio)
         man_map = dict(acfg.get("manifests") or {})
-        # Official test_manifest has no audio on HF — skip unless explicitly listed
-        # and heldout is disabled
+        # Official test_manifest has no audio on HF — skip when heldout enabled
         if held_enabled:
             man_map.pop("test", None)
         source_splits: dict[str, list[dict]] = {"train": [], "dev": [], "test": []}
@@ -596,19 +602,19 @@ def main() -> None:
             print(f"  {split_name} usable: {len(rows)} / {hours(rows)} h")
 
         if held_enabled:
-            n_hold = held_n.get(acfg["source"], 0)
             before = len(source_splits["train"])
+            n_hold = afrispeak_holdout_n(before, held, acfg["source"])
             source_splits["train"], source_splits["test"] = holdout_test_from_train(
                 source_splits["train"], n_hold, held_seed
             )
             print(
-                f"  held-out test from train: n={len(source_splits['test'])} "
-                f"/ {hours(source_splits['test'])} h  "
+                f"  held-out test from train (~{held.get('ratio', 'n')}): "
+                f"n={len(source_splits['test'])} / {hours(source_splits['test'])} h  "
                 f"(train {before} → {len(source_splits['train'])})"
             )
             print(
                 "  note: official test_manifest WAVs not published; "
-                "this held-out set is for in-domain AfriSpeak test only"
+                "official val kept as dev; held-out test carved from train"
             )
         afrispeak_by_source[acfg["source"]] = source_splits
 

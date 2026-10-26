@@ -63,12 +63,14 @@ mbaza_split:
   test_ratio: 0.05
 
 # AfriSpeak official test audio missing → hold out from official train.
-# n matches published test_manifest sizes (18 ♀ / 100 ♂).
+# Official val stays as our dev. Use ~5% of usable train per gender.
 afrispeak_heldout_test:
   enabled: true
   seed: 42
-  female_n: 18
-  male_n: 100
+  ratio: 0.05          # ~86 ♀ / ~440 ♂ from usable train
+  # optional overrides (if set, used instead of ratio):
+  # female_n: 86
+  # male_n: 440
 
 review:
   n_samples_per_source: 50
