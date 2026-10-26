@@ -1,13 +1,5 @@
-# Merge Pastor Uwambaje (STOI>=0.90) + mbaza TTS into one Kin training pool.
-# Raw datasets are never overwritten. Same split used later for Flex + MMS.
-
-pastor:
-  # HF snapshot on Orchard (hf download → local-dir)
-  local_dir: /project/community/rmwisene/datasets/kinyarwanda_pastor_uwambaje
-  hf_id: vysakh25/kinyarwanda-pastor-snac
-  min_squim_stoi: 0.90
-  speaker_id: pastor_uwambaje
-  source: pastor_uwambaje
+# Merge mbaza + AfriSpeak Female + AfriSpeak Male into one Kin training pool.
+# No Pastor. Raw datasets are never overwritten. Same split for Flex + MMS.
 
 mbaza:
   data_root: /project/community/rmwisene/datasets/kinyarwanda_tts
@@ -15,6 +7,28 @@ mbaza:
   audio_dir: audio
   speaker_id: mbaza_spk0
   source: mbaza_tts
+
+afrispeak_female:
+  data_root: /project/community/rmwisene/datasets/afrispeak_kinyarwanda_female
+  hf_id: DigitalUmuganda/afrispeak_kinyarwanda_female_tts_dataset
+  audio_dir: audio
+  manifests:
+    - train_manifest.tsv
+    - val_manifest.tsv
+    - test_manifest.tsv
+  speaker_id: afrispeak_female
+  source: afrispeak_female
+
+afrispeak_male:
+  data_root: /project/community/rmwisene/datasets/afrispeak_kinyarwanda_male
+  hf_id: DigitalUmuganda/afrispeak_kinyarwanda_male_tts_dataset
+  audio_dir: audio
+  manifests:
+    - train_manifest.tsv
+    - val_manifest.tsv
+    - test_manifest.tsv
+  speaker_id: afrispeak_male
+  source: afrispeak_male
 
 audio:
   sample_rate: 16000
@@ -41,12 +55,11 @@ split:
   train_ratio: 0.90
   dev_ratio: 0.05
   test_ratio: 0.05
-  # Stratify by source so both speakers appear in each split when possible
   stratify_by_source: true
 
 review:
-  n_pastor_samples: 100
+  n_samples_per_source: 50
   seed: 42
 
 output:
-  dir: /project/community/rmwisene/tts_data_cleaning/kinyarwanda_tts_merged
+  dir: /project/community/rmwisene/tts_data_cleaning/kinyarwanda_tts_mbaza_afrispeak

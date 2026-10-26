@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""Prepare merged Kinyarwanda TTS corpus: Pastor (STOI≥0.90) + mbaza.
+"""Prepare merged Kinyarwanda TTS corpus: mbaza + AfriSpeak Female + Male.
 
 Order:
-  1) Load Pastor  2) Filter/clean  3) Load mbaza  4) Clean/standardize
-  5) Merge  6) QC (identical-audio dupes / bad text / duration)  7) train/dev/test split
-  8) Same manifests for Kinya-Flex and MMS-TTS-Kin
+  1) Load mbaza  2) Load AfriSpeak F/M  3) Mild text + 16 kHz export
+  4) Merge  5) QC (identical-audio only)  6) stratified train/dev/test
+  7) Same manifests for Kinya-Flex and MMS-TTS-Kin
 
-Does NOT modify raw datasets. Audio copies written under output/audio/.
+Does NOT modify raw datasets. Audio copies under output/audio/.
 
   python scripts/prepare_kinyarwanda_tts_corpus.py
-  python scripts/prepare_kinyarwanda_tts_corpus.py --limit 50   # smoke
+  python scripts/prepare_kinyarwanda_tts_corpus.py --limit 50
 """
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ import json
 import re
 import unicodedata
 from collections import Counter
+from math import gcd
 from pathlib import Path
 
 import numpy as np
@@ -66,7 +67,6 @@ def load_config(path: Path) -> dict:
 
 
 def mild_text(text: str, cfg: dict) -> str:
-    """Preserve case + useful punctuation; no ASR-style wipe."""
     t = text or ""
     if cfg.get("normalize_unicode_nfc", True):
         t = unicodedata.normalize("NFC", t)
@@ -92,8 +92,6 @@ def resample_mono(audio: np.ndarray, sr_in: int, sr_out: int) -> np.ndarray:
 
         return librosa.resample(x, orig_sr=sr_in, target_sr=sr_out)
     except Exception:
-        from math import gcd
-
         from scipy.signal import resample_poly
 
         g = gcd(sr_out, sr_in)
@@ -103,138 +101,26 @@ def resample_mono(audio: np.ndarray, sr_in: int, sr_out: int) -> np.ndarray:
 def write_wav(path: Path, audio: np.ndarray, sr: int) -> float:
     path.parent.mkdir(parents=True, exist_ok=True)
     x = np.asarray(audio, dtype=np.float32)
-    peak = np.max(np.abs(x)) if x.size else 0.0
+    peak = float(np.max(np.abs(x))) if x.size else 0.0
     if peak > 1.0:
         x = x / peak
     sf.write(str(path), x, sr, subtype="PCM_16")
     return float(len(x) / sr) if sr else 0.0
 
 
-def audio_duration(path: Path) -> float | None:
+def read_audio(path: Path) -> tuple[np.ndarray | None, int | None]:
     try:
-        info = sf.info(str(path))
-        return float(info.frames) / float(info.samplerate)
+        arr, sr = sf.read(str(path), always_2d=False)
+        return np.asarray(arr, dtype=np.float32), int(sr)
     except Exception:
-        return None
+        pass
+    try:
+        import librosa
 
-
-def load_pastor_dataset(local_dir: Path, hf_id: str):
-    """Load Pastor split with audio decode disabled (filter STOI first)."""
-    from datasets import Audio, load_dataset
-
-    local_dir = Path(local_dir)
-    if local_dir.is_dir() and any(local_dir.rglob("*.parquet")):
-        data_dir = local_dir / "data"
-        if data_dir.is_dir():
-            ds = load_dataset("parquet", data_dir=str(data_dir))
-        else:
-            ds = load_dataset("parquet", data_files=str(local_dir / "**" / "*.parquet"))
-    elif local_dir.is_dir() and (local_dir / "dataset_info.json").is_file():
-        from datasets import load_from_disk
-
-        ds = load_from_disk(str(local_dir))
-    else:
-        ds = load_dataset(hf_id)
-
-    split_name = "train" if "train" in ds else list(ds.keys())[0]
-    split = ds[split_name]
-    # Do NOT decode audio while filtering — decoding on full iterate fails / is slow
-    if "audio" in split.column_names:
-        split = split.cast_column("audio", Audio(sampling_rate=16000, decode=False))
-    return split
-
-
-def decode_hf_audio(audio_obj, target_sr: int = 16000):
-    """Decode HF Audio(decode=False) dict → (waveform, sr) or (None, None)."""
-    import io
-
-    if audio_obj is None:
+        arr, sr = librosa.load(str(path), sr=None, mono=True)
+        return np.asarray(arr, dtype=np.float32), int(sr)
+    except Exception:
         return None, None
-    if isinstance(audio_obj, dict):
-        if audio_obj.get("array") is not None:
-            return np.asarray(audio_obj["array"], dtype=np.float32), int(
-                audio_obj.get("sampling_rate") or target_sr
-            )
-        raw = audio_obj.get("bytes")
-        if raw:
-            arr, sr = sf.read(io.BytesIO(raw), always_2d=False)
-            return np.asarray(arr, dtype=np.float32), int(sr)
-        path = audio_obj.get("path")
-        if path and Path(path).is_file():
-            arr, sr = sf.read(str(path), always_2d=False)
-            return np.asarray(arr, dtype=np.float32), int(sr)
-    return None, None
-
-
-def pastor_stats(rows: list[dict]) -> dict:
-    durs = np.array([r["duration"] for r in rows], dtype=float)
-    texts = [r["text"] for r in rows]
-    empty = sum(1 for t in texts if not (t or "").strip())
-    stripped = [str(t).strip() for t in texts if t is not None]
-    n_dup = len(stripped) - len(set(stripped))
-    lens = np.array([len(t) for t in stripped], dtype=float) if stripped else np.array([0.0])
-    words = np.array(
-        [len(t.split()) for t in stripped], dtype=float
-    ) if stripped else np.array([0.0])
-    return {
-        "n_clips": len(rows),
-        "total_duration_hours": round(float(durs.sum()) / 3600.0, 4) if len(durs) else 0.0,
-        "duration_s_mean": round(float(durs.mean()), 4) if len(durs) else None,
-        "duration_s_median": round(float(np.median(durs)), 4) if len(durs) else None,
-        "duration_s_min": round(float(durs.min()), 4) if len(durs) else None,
-        "duration_s_max": round(float(durs.max()), 4) if len(durs) else None,
-        "empty_transcripts": empty,
-        "duplicate_transcripts": n_dup,
-        "text_chars_mean": round(float(lens.mean()), 2),
-        "text_chars_median": round(float(np.median(lens)), 2),
-        "text_words_mean": round(float(words.mean()), 2),
-        "text_words_median": round(float(np.median(words)), 2),
-    }
-
-
-def parse_mbaza_metadata(path: Path) -> list[dict]:
-    rows = []
-    with path.open(encoding="utf-8-sig", errors="replace") as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.lower().startswith(("license", "http")):
-                continue
-            m = LINE_QUOTED.match(line)
-            if not m:
-                parts = line.split(None, 1)
-                if len(parts) != 2:
-                    continue
-                utt_id, text = parts[0], parts[1].strip().strip('"')
-            else:
-                utt_id, text = m.group(1), m.group(2)
-            if not text:
-                continue
-            rows.append({"id": utt_id.strip(), "original_text": text})
-    return rows
-
-
-def index_mbaza_audio(audio_dir: Path) -> dict[str, Path]:
-    index: dict[str, Path] = {}
-    for p in audio_dir.rglob("*"):
-        if p.is_file() and p.suffix.lower() in {".wav", ".flac", ".mp3", ".ogg"}:
-            index[p.name] = p
-            index[p.stem] = p
-    return index
-
-
-def resolve_mbaza_audio(utt_id: str, index: dict[str, Path], audio_dir: Path) -> Path | None:
-    stems = [utt_id]
-    if re.match(r"^TTS_\d", utt_id, flags=re.I):
-        stems.append(re.sub(r"^TTS_", "TTS ", utt_id, count=1, flags=re.I))
-    for stem in stems:
-        for key in (stem, f"{stem}.wav", f"{stem}.flac", f"{stem}.mp3"):
-            if key in index:
-                return index[key]
-        for ext in (".wav", ".flac", ".mp3"):
-            p = audio_dir / f"{stem}{ext}"
-            if p.is_file():
-                return p
-    return None
 
 
 def reject(rows: list[dict], reason: str, rejected: list[dict], extra: dict | None = None) -> None:
@@ -252,7 +138,6 @@ def reject(rows: list[dict], reason: str, rejected: list[dict], extra: dict | No
 
 
 def audio_content_hash(path: Path, chunk: int = 1 << 20) -> str | None:
-    """MD5 of audio file bytes — identical copies only, not similar speech."""
     try:
         h = hashlib.md5()
         with Path(path).open("rb") as f:
@@ -267,16 +152,13 @@ def audio_content_hash(path: Path, chunk: int = 1 << 20) -> str | None:
 
 
 def count_text_duplicates(rows: list[dict], clean_cfg: dict) -> dict:
-    """Report repeated transcripts without dropping them."""
     counts: Counter[str] = Counter()
     for r in rows:
         counts[mild_text(r.get("text") or "", clean_cfg)] += 1
-    n_dup_rows = sum(c - 1 for c in counts.values() if c > 1)
-    n_dup_keys = sum(1 for c in counts.values() if c > 1)
     return {
         "n_unique_texts": len(counts),
-        "n_texts_with_repeats": n_dup_keys,
-        "n_extra_rows_same_text": n_dup_rows,
+        "n_texts_with_repeats": sum(1 for c in counts.values() if c > 1),
+        "n_extra_rows_same_text": sum(c - 1 for c in counts.values() if c > 1),
     }
 
 
@@ -308,7 +190,7 @@ def stratified_split(
         for r in rows:
             by_src.setdefault(r["source"], []).append(r)
         out = {"train": [], "dev": [], "test": []}
-        for src, group in by_src.items():
+        for group in by_src.values():
             part = split_group(group)
             for k in out:
                 out[k].extend(part[k])
@@ -327,6 +209,229 @@ def write_manifest(path: Path, rows: list[dict]) -> None:
             w.writerow({k: r.get(k, "") for k in SCHEMA})
 
 
+def parse_mbaza_metadata(path: Path) -> list[dict]:
+    rows = []
+    with path.open(encoding="utf-8-sig", errors="replace") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.lower().startswith(("license", "http")):
+                continue
+            m = LINE_QUOTED.match(line)
+            if not m:
+                parts = line.split(None, 1)
+                if len(parts) != 2:
+                    continue
+                utt_id, text = parts[0], parts[1].strip().strip('"')
+            else:
+                utt_id, text = m.group(1), m.group(2)
+            if not text:
+                continue
+            rows.append({"id": utt_id.strip(), "original_text": text})
+    return rows
+
+
+def index_audio_dir(audio_dir: Path) -> dict[str, Path]:
+    index: dict[str, Path] = {}
+    for p in audio_dir.rglob("*"):
+        if p.is_file() and p.suffix.lower() in {".wav", ".flac", ".mp3", ".ogg"}:
+            index[p.name] = p
+            index[p.stem] = p
+    return index
+
+
+def resolve_mbaza_audio(utt_id: str, index: dict[str, Path], audio_dir: Path) -> Path | None:
+    stems = [utt_id]
+    if re.match(r"^TTS_\d", utt_id, flags=re.I):
+        stems.append(re.sub(r"^TTS_", "TTS ", utt_id, count=1, flags=re.I))
+    for stem in stems:
+        for key in (stem, f"{stem}.wav", f"{stem}.flac", f"{stem}.mp3"):
+            if key in index:
+                return index[key]
+        for ext in (".wav", ".flac", ".mp3"):
+            p = audio_dir / f"{stem}{ext}"
+            if p.is_file():
+                return p
+    return None
+
+
+def detect_col(fieldnames: list[str] | None, keys: tuple[str, ...]) -> str | None:
+    if not fieldnames:
+        return None
+    lower = {(f or "").lstrip("\ufeff").strip().lower(): f for f in fieldnames if f}
+    for k in keys:
+        if k in lower:
+            return lower[k]
+    for k in keys:
+        for low, orig in lower.items():
+            if k in low:
+                return orig
+    return None
+
+
+def parse_afrispeak_manifests(root: Path, manifest_names: list[str]) -> list[dict]:
+    """Load AfriSpeak TSV rows: text + audio_name → audio/{id}.wav."""
+    rows: list[dict] = []
+    seen: set[str] = set()
+    for name in manifest_names:
+        path = root / name
+        if not path.is_file():
+            print(f"  warn: missing manifest {path}")
+            continue
+        with path.open(encoding="utf-8-sig", newline="", errors="replace") as f:
+            sample = f.read(4096)
+            f.seek(0)
+            delim = "\t" if sample.count("\t") >= sample.count(",") else ","
+            reader = csv.DictReader(f, delimiter=delim)
+            fields = list(reader.fieldnames or [])
+            text_col = detect_col(fields, ("text", "sentence", "transcript"))
+            audio_col = detect_col(fields, ("audio_name", "audio", "path", "filename", "wav"))
+            if text_col is None or audio_col is None:
+                raise SystemExit(f"AfriSpeak manifest missing text/audio columns: {path} {fields}")
+            for r in reader:
+                text = (r.get(text_col) or "").strip()
+                audio_name = (r.get(audio_col) or "").strip()
+                if not text or not audio_name:
+                    continue
+                # normalize id (manifest may be int-like)
+                audio_id = str(audio_name).strip()
+                if audio_id.endswith(".wav"):
+                    audio_id = Path(audio_id).stem
+                key = f"{name}::{audio_id}"
+                if key in seen:
+                    continue
+                seen.add(key)
+                rows.append(
+                    {
+                        "id": audio_id,
+                        "original_text": text,
+                        "manifest": name,
+                    }
+                )
+    return rows
+
+
+def resolve_afrispeak_audio(audio_id: str, index: dict[str, Path], audio_dir: Path) -> Path | None:
+    for key in (audio_id, f"{audio_id}.wav", str(int(audio_id)) if audio_id.isdigit() else None):
+        if key and key in index:
+            return index[key]
+    for ext in (".wav", ".flac", ".mp3"):
+        p = audio_dir / f"{audio_id}{ext}"
+        if p.is_file():
+            return p
+        if audio_id.isdigit():
+            p2 = audio_dir / f"{int(audio_id)}{ext}"
+            if p2.is_file():
+                return p2
+    return None
+
+
+def export_rows(
+    items: list[dict],
+    *,
+    source: str,
+    speaker_id: str,
+    resolve_fn,
+    audio_subdir: Path,
+    clean_cfg: dict,
+    sr_out: int,
+    rejected: list[dict],
+    skip_audio_export: bool,
+    limit: int,
+) -> list[dict]:
+    kept: list[dict] = []
+    for i, item in enumerate(items):
+        if limit and len(kept) >= limit:
+            break
+        raw_id = str(item["id"])
+        safe_id = re.sub(r"[^\w.\-]+", "_", raw_id)
+        utt_id = f"{source}_{safe_id}"
+        text = mild_text(item["original_text"], clean_cfg)
+
+        if clean_cfg.get("drop_empty_text", True) and not text:
+            reject([{"utt_id": utt_id, "source": source, "text": "", "audio_path": ""}], "empty_text", rejected)
+            continue
+        if len(text) < int(clean_cfg["min_chars"]) or len(text) > int(clean_cfg["max_chars"]):
+            reject(
+                [{"utt_id": utt_id, "source": source, "text": text, "audio_path": ""}],
+                "text_length",
+                rejected,
+            )
+            continue
+
+        src_audio = resolve_fn(raw_id)
+        if src_audio is None:
+            reject(
+                [{"utt_id": utt_id, "source": source, "text": text, "audio_path": ""}],
+                "missing_audio",
+                rejected,
+            )
+            continue
+
+        arr, sr_in = read_audio(src_audio)
+        if arr is None or not sr_in:
+            reject(
+                [{"utt_id": utt_id, "source": source, "text": text, "audio_path": str(src_audio)}],
+                "unreadable_audio",
+                rejected,
+            )
+            continue
+
+        if skip_audio_export and int(sr_in) == sr_out and src_audio.suffix.lower() == ".wav":
+            out_path = src_audio
+            dur = float(len(arr) / sr_in)
+        else:
+            arr = resample_mono(arr, int(sr_in), sr_out)
+            out_path = audio_subdir / f"{safe_id}.wav"
+            dur = write_wav(out_path, arr, sr_out)
+
+        if dur < float(clean_cfg["min_duration_s"]) or dur > float(clean_cfg["max_duration_s"]):
+            reject(
+                [{"utt_id": utt_id, "source": source, "text": text, "audio_path": str(out_path)}],
+                "duration_out_of_range",
+                rejected,
+            )
+            continue
+
+        kept.append(
+            {
+                "utt_id": utt_id,
+                "audio_path": str(Path(out_path).resolve()),
+                "text": text,
+                "speaker_id": speaker_id,
+                "source": source,
+                "duration": round(float(dur), 3),
+            }
+        )
+        if (i + 1) % 500 == 0:
+            print(f"    {source} processed {i + 1}/{len(items)}  kept={len(kept)}")
+    return kept
+
+
+def write_review_sample(path: Path, rows: list[dict], n: int, seed: int) -> None:
+    rng = np.random.default_rng(seed)
+    idx = list(range(len(rows)))
+    rng.shuffle(idx)
+    idx = idx[: min(n, len(idx))]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(
+            f, fieldnames=["utt_id", "text", "duration", "speaker_id", "source", "audio_path"]
+        )
+        w.writeheader()
+        for j in idx:
+            r = rows[j]
+            w.writerow(
+                {
+                    "utt_id": r["utt_id"],
+                    "text": r["text"],
+                    "duration": r["duration"],
+                    "speaker_id": r["speaker_id"],
+                    "source": r["source"],
+                    "audio_path": r["audio_path"],
+                }
+            )
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument(
@@ -340,7 +445,7 @@ def main() -> None:
     ap.add_argument(
         "--skip_audio_export",
         action="store_true",
-        help="Keep original audio paths (still require readable audio)",
+        help="Keep original wav paths when already 16 kHz",
     )
     args = ap.parse_args()
 
@@ -354,304 +459,76 @@ def main() -> None:
     clean_cfg = cfg["cleaning"]
     sr_out = int(cfg["audio"]["sample_rate"])
     rejected: list[dict] = []
+    pool_parts: list[dict] = []
 
     # ------------------------------------------------------------------
-    # 1–2) Pastor: load, filter STOI, stats, review sample, export
+    # 1) mbaza
     # ------------------------------------------------------------------
-    print("=== 1/2 Pastor Uwambaje ===")
-    pastor_cfg = cfg["pastor"]
-    split = load_pastor_dataset(Path(pastor_cfg["local_dir"]), pastor_cfg["hf_id"])
-    print(f"  loaded rows: {len(split)}  columns: {split.column_names}")
-
-    min_stoi = float(pastor_cfg["min_squim_stoi"])
-    # Column access avoids decoding audio for every row
-    stoi_col = split["squim_stoi"]
-    text_col = split["text"]
-    dur_col = split["duration"]
-    n_below = 0
-    pastor_kept_raw: list[dict] = []
-    for i in range(len(split)):
-        stoi = float(stoi_col[i] or 0.0)
-        text_raw = text_col[i] or ""
-        dur = float(dur_col[i] or 0.0)
-        if stoi < min_stoi:
-            n_below += 1
-            continue
-        pastor_kept_raw.append(
-            {
-                "idx": i,
-                "utt_id": f"pastor_{i:06d}",
-                "text_raw": text_raw,
-                "duration_meta": dur,
-                "squim_stoi": stoi,
-                "speaker_id": pastor_cfg["speaker_id"],
-                "source": pastor_cfg["source"],
-            }
-        )
-        if args.limit and len(pastor_kept_raw) >= args.limit:
-            break
-
-    print(f"  after STOI>={min_stoi}: {len(pastor_kept_raw)}  (excluded below threshold: {n_below})")
-    rejected.append(
-        {
-            "utt_id": "AGGREGATE",
-            "source": pastor_cfg["source"],
-            "reason": f"stoi_below_{min_stoi}",
-            "text": f"count={n_below}",
-            "audio_path": "",
-            "squim_stoi": "",
-        }
-    )
-
-    # Stats on filtered set (pre-export)
-    stats_rows = [
-        {
-            "duration": r["duration_meta"],
-            "text": mild_text(str(r["text_raw"]), clean_cfg),
-        }
-        for r in pastor_kept_raw
-    ]
-    pstats = pastor_stats(stats_rows)
-    pstats["min_squim_stoi"] = min_stoi
-    (out_dir / "pastor_stoi90_stats.json").write_text(
-        json.dumps(pstats, indent=2) + "\n", encoding="utf-8"
-    )
-    print(f"  Pastor stats: {pstats['n_clips']} clips, {pstats['total_duration_hours']} h")
-
-    # Manual review sample
-    review_n = int(cfg["review"]["n_pastor_samples"])
-    review_seed = int(cfg["review"]["seed"])
-    rng = np.random.default_rng(review_seed)
-    review_idx = list(range(len(pastor_kept_raw)))
-    rng.shuffle(review_idx)
-    review_idx = review_idx[: min(review_n, len(review_idx))]
-    review_path = out_dir / "pastor_manual_review_sample.csv"
-    with review_path.open("w", encoding="utf-8", newline="") as f:
-        w = csv.DictWriter(
-            f,
-            fieldnames=[
-                "utt_id",
-                "text",
-                "duration",
-                "squim_stoi",
-                "speaker_id",
-                "source",
-                "note",
-            ],
-        )
-        w.writeheader()
-        for j in review_idx:
-            r = pastor_kept_raw[j]
-            w.writerow(
-                {
-                    "utt_id": r["utt_id"],
-                    "text": mild_text(str(r["text_raw"]), clean_cfg),
-                    "duration": r["duration_meta"],
-                    "squim_stoi": r["squim_stoi"],
-                    "speaker_id": r["speaker_id"],
-                    "source": r["source"],
-                    "note": "Gemini Flash transcript — listen and verify",
-                }
-            )
-    print(f"  review sample: {len(review_idx)} → {review_path}")
-
-    pastor_rows: list[dict] = []
-    print(f"  exporting Pastor audio → {audio_out / 'pastor'} …")
-    for n_done, r in enumerate(pastor_kept_raw, 1):
-        text = mild_text(str(r["text_raw"]), clean_cfg)
-        if clean_cfg.get("drop_empty_text", True) and not text:
-            reject([{"utt_id": r["utt_id"], "source": r["source"], "text": "", "audio_path": ""}], "empty_text", rejected)
-            continue
-        if len(text) < int(clean_cfg["min_chars"]) or len(text) > int(clean_cfg["max_chars"]):
-            reject(
-                [{"utt_id": r["utt_id"], "source": r["source"], "text": text, "audio_path": ""}],
-                "text_length",
-                rejected,
-            )
-            continue
-
-        # Decode audio only for kept rows
-        try:
-            audio_obj = split[r["idx"]]["audio"]
-        except Exception as e:
-            reject(
-                [
-                    {
-                        "utt_id": r["utt_id"],
-                        "source": r["source"],
-                        "text": text,
-                        "audio_path": "",
-                    }
-                ],
-                f"audio_row_error:{type(e).__name__}",
-                rejected,
-            )
-            continue
-
-        arr, sr_in = decode_hf_audio(audio_obj, target_sr=sr_out)
-        if arr is None:
-            reject(
-                [{"utt_id": r["utt_id"], "source": r["source"], "text": text, "audio_path": ""}],
-                "missing_or_undecodable_audio",
-                rejected,
-            )
-            continue
-
-        if args.skip_audio_export and isinstance(audio_obj, dict) and audio_obj.get("path"):
-            out_path = Path(audio_obj["path"])
-            dur = audio_duration(out_path) or float(r["duration_meta"])
-        else:
-            arr = resample_mono(arr, int(sr_in or sr_out), sr_out)
-            out_path = audio_out / "pastor" / f"{r['utt_id']}.wav"
-            dur = write_wav(out_path, arr, sr_out)
-
-        if dur < float(clean_cfg["min_duration_s"]) or dur > float(clean_cfg["max_duration_s"]):
-            reject(
-                [
-                    {
-                        "utt_id": r["utt_id"],
-                        "source": r["source"],
-                        "text": text,
-                        "audio_path": str(out_path),
-                    }
-                ],
-                "duration_out_of_range",
-                rejected,
-            )
-            continue
-
-        pastor_rows.append(
-            {
-                "utt_id": r["utt_id"],
-                "audio_path": str(out_path.resolve()),
-                "text": text,
-                "speaker_id": r["speaker_id"],
-                "source": r["source"],
-                "duration": round(dur, 3),
-            }
-        )
-        if n_done % 500 == 0 or n_done == len(pastor_kept_raw):
-            print(f"    pastor export {n_done}/{len(pastor_kept_raw)}  kept={len(pastor_rows)}")
-
-    print(f"  Pastor usable: {len(pastor_rows)}")
-
-    # ------------------------------------------------------------------
-    # 3–4) mbaza: load, mild text (no lowercase), standardize audio
-    # ------------------------------------------------------------------
-    print("=== 3/4 mbaza TTS ===")
+    print("=== 1/3 mbaza TTS ===")
     mbaza_cfg = cfg["mbaza"]
     root = Path(mbaza_cfg["data_root"])
     meta = root / mbaza_cfg["metadata"]
     audio_dir = root / mbaza_cfg["audio_dir"]
+    if not meta.is_file():
+        raise SystemExit(f"Missing mbaza metadata: {meta}")
     mbaza_meta = parse_mbaza_metadata(meta)
-    if args.limit:
-        mbaza_meta = mbaza_meta[: args.limit]
-    index = index_mbaza_audio(audio_dir)
-    print(f"  metadata: {len(mbaza_meta)}  audio files indexed: {len(set(index.values()))}")
-
-    mbaza_rows: list[dict] = []
-    for item in mbaza_meta:
-        utt_id = item["id"]
-        text = mild_text(item["original_text"], clean_cfg)
-        src_audio = resolve_mbaza_audio(utt_id, index, audio_dir)
-        safe_id = re.sub(r"[^\w.\-]+", "_", utt_id)
-
-        if not text:
-            reject(
-                [{"utt_id": f"mbaza_{safe_id}", "source": mbaza_cfg["source"], "text": "", "audio_path": ""}],
-                "empty_text",
-                rejected,
-            )
-            continue
-        if len(text) < int(clean_cfg["min_chars"]) or len(text) > int(clean_cfg["max_chars"]):
-            reject(
-                [
-                    {
-                        "utt_id": f"mbaza_{safe_id}",
-                        "source": mbaza_cfg["source"],
-                        "text": text,
-                        "audio_path": "",
-                    }
-                ],
-                "text_length",
-                rejected,
-            )
-            continue
-        if src_audio is None:
-            reject(
-                [
-                    {
-                        "utt_id": f"mbaza_{safe_id}",
-                        "source": mbaza_cfg["source"],
-                        "text": text,
-                        "audio_path": "",
-                    }
-                ],
-                "missing_audio",
-                rejected,
-            )
-            continue
-
-        try:
-            arr, sr_in = sf.read(str(src_audio), always_2d=False)
-        except Exception:
-            reject(
-                [
-                    {
-                        "utt_id": f"mbaza_{safe_id}",
-                        "source": mbaza_cfg["source"],
-                        "text": text,
-                        "audio_path": str(src_audio),
-                    }
-                ],
-                "unreadable_audio",
-                rejected,
-            )
-            continue
-
-        if args.skip_audio_export and int(sr_in) == sr_out:
-            out_path = src_audio
-            dur = audio_duration(out_path) or 0.0
-        else:
-            arr = resample_mono(np.asarray(arr, dtype=np.float32), int(sr_in), sr_out)
-            out_path = audio_out / "mbaza" / f"{safe_id}.wav"
-            dur = write_wav(out_path, arr, sr_out)
-
-        if dur < float(clean_cfg["min_duration_s"]) or dur > float(clean_cfg["max_duration_s"]):
-            reject(
-                [
-                    {
-                        "utt_id": f"mbaza_{safe_id}",
-                        "source": mbaza_cfg["source"],
-                        "text": text,
-                        "audio_path": str(out_path),
-                    }
-                ],
-                "duration_out_of_range",
-                rejected,
-            )
-            continue
-
-        mbaza_rows.append(
-            {
-                "utt_id": f"mbaza_{safe_id}",
-                "audio_path": str(Path(out_path).resolve()),
-                "text": text,
-                "speaker_id": mbaza_cfg["speaker_id"],
-                "source": mbaza_cfg["source"],
-                "duration": round(float(dur), 3),
-            }
-        )
-
+    index = index_audio_dir(audio_dir)
+    print(f"  metadata: {len(mbaza_meta)}  audio indexed: {len(set(index.values()))}")
+    mbaza_rows = export_rows(
+        mbaza_meta,
+        source=mbaza_cfg["source"],
+        speaker_id=mbaza_cfg["speaker_id"],
+        resolve_fn=lambda uid: resolve_mbaza_audio(uid, index, audio_dir),
+        audio_subdir=audio_out / "mbaza",
+        clean_cfg=clean_cfg,
+        sr_out=sr_out,
+        rejected=rejected,
+        skip_audio_export=args.skip_audio_export,
+        limit=args.limit,
+    )
     print(f"  mbaza usable: {len(mbaza_rows)}")
+    pool_parts.extend(mbaza_rows)
 
     # ------------------------------------------------------------------
-    # 5–6) Merge + pool QC
+    # 2–3) AfriSpeak Female / Male
     # ------------------------------------------------------------------
-    print("=== 5/6 Merge + QC ===")
-    pool = pastor_rows + mbaza_rows
+    for key, label in (
+        ("afrispeak_female", "2/3 AfriSpeak Female"),
+        ("afrispeak_male", "3/3 AfriSpeak Male"),
+    ):
+        print(f"=== {label} ===")
+        acfg = cfg[key]
+        aroot = Path(acfg["data_root"])
+        if not aroot.is_dir():
+            raise SystemExit(
+                f"Missing {key} at {aroot}\n"
+                f"  hf download {acfg['hf_id']} --repo-type dataset --local-dir {aroot}"
+            )
+        aaudio = aroot / acfg.get("audio_dir", "audio")
+        aindex = index_audio_dir(aaudio)
+        items = parse_afrispeak_manifests(aroot, list(acfg.get("manifests") or []))
+        print(f"  manifests rows: {len(items)}  audio indexed: {len(set(aindex.values()))}")
+        rows = export_rows(
+            items,
+            source=acfg["source"],
+            speaker_id=acfg["speaker_id"],
+            resolve_fn=lambda uid, idx=aindex, ad=aaudio: resolve_afrispeak_audio(uid, idx, ad),
+            audio_subdir=audio_out / acfg["source"],
+            clean_cfg=clean_cfg,
+            sr_out=sr_out,
+            rejected=rejected,
+            skip_audio_export=args.skip_audio_export,
+            limit=args.limit,
+        )
+        print(f"  {key} usable: {len(rows)}")
+        pool_parts.extend(rows)
+
+    # ------------------------------------------------------------------
+    # Merge + QC
+    # ------------------------------------------------------------------
+    print("=== Merge + QC ===")
+    pool = list(pool_parts)
     print(f"  pool before audio dedupe: {len(pool)}")
-
     text_dup_stats = count_text_duplicates(pool, clean_cfg)
     print(
         "  text repeats (kept): "
@@ -659,7 +536,6 @@ def main() -> None:
         f"+{text_dup_stats['n_extra_rows_same_text']} rows"
     )
 
-    # Optional / discouraged: drop on text alone (default off — TTS repeats are useful)
     if clean_cfg.get("drop_duplicate_text", False):
         seen: set[str] = set()
         deduped = []
@@ -673,7 +549,6 @@ def main() -> None:
         pool = deduped
         print(f"  after text dedupe (enabled): {len(pool)}")
 
-    # Drop only when audio bytes are identical (true copies / clear redundancy)
     if clean_cfg.get("drop_duplicate_audio", True):
         seen_hash: set[str] = set()
         deduped = []
@@ -696,10 +571,20 @@ def main() -> None:
             f"(dropped={n_dropped}, unreadable_hash={n_unhashed})"
         )
 
-    # ------------------------------------------------------------------
-    # 7) Split
-    # ------------------------------------------------------------------
-    print("=== 7 Split ===")
+    # Review samples
+    review_n = int(cfg.get("review", {}).get("n_samples_per_source", 50))
+    review_seed = int(cfg.get("review", {}).get("seed", 42))
+    by_src: dict[str, list[dict]] = {}
+    for r in pool:
+        by_src.setdefault(r["source"], []).append(r)
+    for src, rows in by_src.items():
+        write_review_sample(
+            out_dir / f"review_{src}.csv", rows, review_n, review_seed
+        )
+        print(f"  review sample {src}: {min(review_n, len(rows))} → review_{src}.csv")
+
+    # Split
+    print("=== Split ===")
     sp = cfg["split"]
     splits = stratified_split(
         pool,
@@ -711,41 +596,37 @@ def main() -> None:
     )
     for name, rows in splits.items():
         write_manifest(man_dir / f"{name}.csv", rows)
-        hours = sum(r["duration"] for r in rows) / 3600.0
+        hours = sum(float(r["duration"]) for r in rows) / 3600.0
         print(f"  {name}: {len(rows)} clips, {hours:.3f} h")
-
     write_manifest(man_dir / "all.csv", pool)
 
-    # Rejected
     rej_path = out_dir / "rejected.csv"
     with rej_path.open("w", encoding="utf-8", newline="") as f:
-        fields = ["utt_id", "source", "reason", "text", "audio_path", "squim_stoi", "audio_md5"]
+        fields = ["utt_id", "source", "reason", "text", "audio_path", "audio_md5"]
         w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
         w.writeheader()
         for r in rejected:
             w.writerow(r)
 
-    # Dataset statistics
     def src_stats(rows: list[dict]) -> dict:
-        by = {}
+        by: dict[str, dict] = {}
         for r in rows:
             by.setdefault(r["source"], {"n": 0, "duration_s": 0.0})
             by[r["source"]]["n"] += 1
             by[r["source"]]["duration_s"] += float(r["duration"])
-        for k, v in by.items():
+        for v in by.values():
             v["duration_hours"] = round(v["duration_s"] / 3600.0, 4)
         return by
 
     all_stats = {
-        "pastor_filtered": pstats,
         "n_pool": len(pool),
-        "pool_hours": round(sum(r["duration"] for r in pool) / 3600.0, 4),
+        "pool_hours": round(sum(float(r["duration"]) for r in pool) / 3600.0, 4),
         "by_source": src_stats(pool),
         "text_duplicate_report": text_dup_stats,
         "splits": {
             k: {
                 "n": len(v),
-                "hours": round(sum(r["duration"] for r in v) / 3600.0, 4),
+                "hours": round(sum(float(r["duration"]) for r in v) / 3600.0, 4),
                 "by_source": src_stats(v),
             }
             for k, v in splits.items()
@@ -755,67 +636,62 @@ def main() -> None:
         "audio": cfg["audio"],
         "cleaning": clean_cfg,
         "note": (
-            "Raw Pastor/mbaza datasets were not modified. "
-            "Duplicate text is kept by default; only identical audio bytes are dropped. "
-            "Use manifests/train.csv|dev.csv|test.csv for both Flex and MMS."
+            "mbaza + AfriSpeak Female + AfriSpeak Male. No Pastor. "
+            "Duplicate text kept; only identical audio bytes dropped. "
+            "Use manifests for both Flex and MMS."
         ),
     }
     (out_dir / "dataset_statistics.json").write_text(
         json.dumps(all_stats, indent=2) + "\n", encoding="utf-8"
     )
-
-    split_config = {
-        "seed": sp["seed"],
-        "train_ratio": sp["train_ratio"],
-        "dev_ratio": sp["dev_ratio"],
-        "test_ratio": sp["test_ratio"],
-        "stratify_by_source": sp.get("stratify_by_source", True),
-        "pastor_min_squim_stoi": min_stoi,
-        "sample_rate": sr_out,
-        "lowercase": clean_cfg.get("lowercase", False),
-        "output_dir": str(out_dir),
-        "manifests": {
-            "train": str(man_dir / "train.csv"),
-            "dev": str(man_dir / "dev.csv"),
-            "test": str(man_dir / "test.csv"),
-            "all": str(man_dir / "all.csv"),
-        },
-    }
     (out_dir / "split_config.json").write_text(
-        json.dumps(split_config, indent=2) + "\n", encoding="utf-8"
+        json.dumps(
+            {
+                "seed": sp["seed"],
+                "train_ratio": sp["train_ratio"],
+                "dev_ratio": sp["dev_ratio"],
+                "test_ratio": sp["test_ratio"],
+                "stratify_by_source": sp.get("stratify_by_source", True),
+                "sample_rate": sr_out,
+                "output_dir": str(out_dir),
+                "manifests": {
+                    "train": str(man_dir / "train.csv"),
+                    "dev": str(man_dir / "dev.csv"),
+                    "test": str(man_dir / "test.csv"),
+                    "all": str(man_dir / "all.csv"),
+                },
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
     )
 
     report = [
-        "Kinyarwanda TTS merged corpus",
-        "=============================",
+        "Kinyarwanda TTS merged corpus (mbaza + AfriSpeak)",
+        "=================================================",
         f"Output: {out_dir}",
-        f"Pastor STOI>={min_stoi}: {pstats['n_clips']} clips / {pstats['total_duration_hours']} h (pre-QC filter set)",
-        f"Pastor usable after QC: {len(pastor_rows)}",
-        f"mbaza usable: {len(mbaza_rows)}",
         f"Merged pool: {len(pool)} clips / {all_stats['pool_hours']} h",
         f"Rejected: {len(rejected)}",
-        f"Review sample: {review_path}",
         "",
-        "Splits:",
+        "By source:",
     ]
+    for src, st in all_stats["by_source"].items():
+        report.append(f"  {src}: {st['n']} clips / {st['duration_hours']} h")
+    report += ["", "Splits:"]
     for k, v in splits.items():
-        report.append(
-            f"  {k}: {len(v)} / {all_stats['splits'][k]['hours']} h"
-        )
+        report.append(f"  {k}: {len(v)} / {all_stats['splits'][k]['hours']} h")
     report += [
         "",
         "Use the same manifests for Kinya-Flex and MMS-TTS-Kin.",
-        "Schema: audio_path, text, speaker_id, source, duration (+ utt_id).",
         "",
     ]
     (out_dir / "prepare_report.txt").write_text("\n".join(report), encoding="utf-8")
 
     print()
-    print(report[0])
-    for line in report[2:]:
+    for line in report:
         print(line)
     print(f"Wrote stats → {out_dir / 'dataset_statistics.json'}")
-    print(f"Wrote split  → {out_dir / 'split_config.json'}")
     print(f"Wrote rejected → {rej_path}")
 
 
