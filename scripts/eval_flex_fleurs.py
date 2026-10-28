@@ -28,7 +28,11 @@ def main() -> None:
         "--manifest_dir",
         default="/project/community/rmwisene/datasets/fleurs_kinyarwanda/processed/eval",
     )
-    p.add_argument("--split", default="test", choices=["test", "dev"])
+    p.add_argument(
+        "--split",
+        default="test",
+        help="Manifest basename without .tsv (test/dev; also Kidaw’ida eval)",
+    )
     p.add_argument(
         "--checkpoint",
         default=os.environ.get("BASELINES", "/project/community/rmwisene/tts_baselines")
@@ -67,7 +71,9 @@ def main() -> None:
     manifest = Path(args.manifest_dir) / f"{args.split}.tsv"
     if not manifest.is_file():
         raise SystemExit(
-            f"Missing {manifest}. Run: python scripts/clean_fleurs_eval.py"
+            f"Missing {manifest}. "
+            "FLEURS: python scripts/clean_fleurs_eval.py | "
+            "Kidaw’ida: python scripts/prepare_kidawida_eval_manifest.py"
         )
     ckpt = Path(args.checkpoint)
     if not ckpt.is_file():

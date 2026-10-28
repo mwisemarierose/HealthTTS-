@@ -55,6 +55,70 @@ Expected data layout after downloads:
 
 Nothing changes: **FLEURS stays baseline evaluation** for Kinyarwanda.
 
+## Experiments
+
+All fine-tunes init from the **same** pretrained B0/B1 weights (not sequential E1→E3).  
+Kin train hours = combined pool `train.csv` (**17.89 h**). Kidaw’ida **27.07 h** = ASR expanded **train** only.  
+Balanced bilingual (E3/E4): sample a reproducible **~17.89 h** subset of Kidaw’ida train (`seed` logged).
+
+| Exp. | Model | Training condition | Kinyarwanda train | Kidaw’ida train | Data balance | Epochs | Main question |
+|------|-------|--------------------|------------------:|----------------:|--------------|-------:|---------------|
+| **B0** | MMS-TTS-Kin | Pretrained baseline, no fine-tuning | 0 h | 0 h | — | 0 | How well does the Kinyarwanda-pretrained baseline perform on Kinyarwanda, and what is its **zero-shot Kidaw’ida** capability? |
+| **B1** | Kinya-Flex | Pretrained baseline, no fine-tuning | 0 h | 0 h | — | 0 | Same baseline and **zero-shot Kidaw’ida** evaluation for Kinya-Flex |
+| **E1** | MMS-TTS-Kin | Kinyarwanda-only fine-tuning | **17.89 h** | 0 h | — | **30** | How much can MMS improve its existing Kinyarwanda TTS capability? |
+| **E2** | Kinya-Flex | Kinyarwanda-only fine-tuning | **17.89 h** | 0 h | — | **30** | How much can Kinya-Flex improve its existing Kinyarwanda TTS capability? |
+| **E3** | MMS-TTS-Kin | Combined Kinyarwanda + Kidaw’ida | **17.89 h** | **~17.89 h subset** | **Balanced** | **50** | How well does MMS learn Kidaw’ida when both languages contribute approximately equal training volume? |
+| **E4** | Kinya-Flex | Combined Kinyarwanda + Kidaw’ida | **17.89 h** | **~17.89 h subset** | **Balanced** | **50** | Same balanced bilingual experiment for Kinya-Flex |
+| **E5** | MMS-TTS-Kin | Combined Kinyarwanda + full Kidaw’ida | **17.89 h** | **27.07 h** | **Unbalanced** | **50** | What happens when all available Kidaw’ida data are used instead of matching Kinyarwanda volume? |
+| **E6** | Kinya-Flex | Combined Kinyarwanda + full Kidaw’ida | **17.89 h** | **27.07 h** | **Unbalanced** | **50** | Same full-data bilingual experiment for Kinya-Flex |
+
+**Validation / early stop:** Kin-only (E1/E2) → combined Kin `dev.csv`. Bilingual (E3–E6) → Kin dev + Kidaw’ida dev (fixed rule).  
+**Final eval (every condition):** FLEURS Kin (re-score after FT; B0/B1 already done); Kin tests separately (`test_mbaza`, `test_afrispeak_female`, `test_afrispeak_male`), then optional combined Kin test; Kidaw’ida test for zero-shot (B0/B1) and after bilingual FT (E3–E6).
+
+### Metrics (every final test condition)
+
+| Metric | Direction | What it measures |
+|--------|-----------|------------------|
+| **WER** | ↓ | Intelligibility at word level through ASR loopback |
+| **CER** | ↓ | Intelligibility at character level |
+| **UTMOS** | ↑ | Estimated speech naturalness |
+| **Inference latency** | ↓ | Time required to generate speech |
+| **RTF** | ↓ | Synthesis speed relative to audio duration |
+
+Same ASR (Drive CTC), UTMOS, and hardware notes for all rows so B0/B1 ↔ E* are comparable. Details: `configs/metrics.yaml`.
+
+### B0 / B1 — zero-shot Kidaw’ida (ASR expanded test)
+
+Uses Kidaw’ida ASR **test** (~1004 clips / ~1.35 h). Kin models synthesize Dav text with **no Dav fine-tuning**.
+
+```bash
+conda activate healthtts
+cd ~/HealthTTS
+
+# 1) FLEURS-style manifests from ASR processed TSVs (once)
+python scripts/prepare_kidawida_eval_manifest.py
+# → …/kidawida_asr_drive/processed/kidawida/eval/{test,dev}.tsv
+
+# 2) Synthesize (GPU) — smoke then full
+LIMIT=20 bash scripts/submit_eval_mms_kidawida.sh
+bash scripts/submit_eval_mms_kidawida.sh
+
+LIMIT=20 bash scripts/submit_eval_flex_kidawida.sh
+bash scripts/submit_eval_flex_kidawida.sh
+
+# 3) Score (WER/CER/UTMOS/RTF) — same scorer as FLEURS
+# MMS:
+SYNTH_DIR=$BASELINES/eval_kidawida/mms_tts_kin/test \
+  SLURM_JOB_NAME=score-mms-dav RETIME=0 \
+  bash scripts/submit_score_tts_fleurs.sh
+# Flex:
+SYNTH_DIR=$BASELINES/eval_kidawida/kinya_flex_tts/test \
+  SLURM_JOB_NAME=score-flex-dav RETIME=0 \
+  bash scripts/submit_score_tts_fleurs.sh
+```
+
+Outputs under `$BASELINES/eval_kidawida/{mms_tts_kin,kinya_flex_tts}/test/`.
+
 ## Environment
 
 ```bash
@@ -266,11 +330,8 @@ Outputs under `$BASELINES/eval_fleurs/mms_tts_kin/test/`.
 
 ## Agreed evaluation metrics
 
-See `configs/metrics.yaml`.
-
-1. **WER & CER (ASR loopback)** — Text → TTS → audio → **Drive CTC** → text  
-2. **Latency & RTF** — synth wall time and `synth_time / audio_duration`  
-3. **Audio quality** — UTMOS (automatic MOS / naturalness)
+Canonical table: **[Experiments → Metrics](#metrics-every-final-test-condition)** above.  
+Pipeline: Text → TTS → audio → **Drive CTC** → WER/CER; plus latency, RTF, UTMOS (`configs/metrics.yaml`).
 
 ASR scorer: NeMo CTC from Drive  
 https://drive.google.com/file/d/1gx4olc2XdlUNkNlFqXcOq1F4IbcVHyGI/view  
