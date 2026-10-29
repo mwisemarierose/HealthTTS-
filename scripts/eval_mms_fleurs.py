@@ -23,8 +23,36 @@ import time
 from pathlib import Path
 
 
+SOURCE_TO_SPK = {
+    "afrispeak_female": 0,
+    "mbaza_tts": 1,
+    "afrispeak_male": 2,
+}
+
+
+def resolve_speaker_id(row: dict) -> int:
+    """Kin pool CSV may store speaker_id as 'mbaza_spk0' — map via source or int."""
+    raw = row.get("speaker_id", "")
+    if raw is not None and str(raw).strip() != "":
+        s = str(raw).strip()
+        try:
+            return int(s)
+        except ValueError:
+            pass
+        # e.g. mbaza_spk0 / afrispeak_female_spk1
+        low = s.lower()
+        if "afrispeak_female" in low or low.startswith("af_f"):
+            return 0
+        if "afrispeak_male" in low or low.startswith("af_m"):
+            return 2
+        if "mbaza" in low:
+            return 1
+    source = (row.get("source") or "").strip()
+    return SOURCE_TO_SPK.get(source, 0)
+
+
 def read_manifest(path: Path) -> list[dict]:
-    """Normalize rows to id, text, audio_path, speaker_id."""
+    """Normalize rows to id, text, audio_path, speaker_id (int)."""
     delim = "\t" if path.suffix.lower() == ".tsv" else ","
     with path.open(encoding="utf-8", newline="") as f:
         raw = list(csv.DictReader(f, delimiter=delim))
@@ -33,18 +61,6 @@ def read_manifest(path: Path) -> list[dict]:
         utt_id = (r.get("id") or r.get("utt_id") or "").strip()
         text = (r.get("text") or "").strip()
         audio = (r.get("audio_path") or r.get("path") or "").strip()
-        spk = r.get("speaker_id", "")
-        if spk is None or str(spk).strip() == "":
-            # Kin pool uses source names in some exports
-            source = (r.get("source") or "").strip()
-            spk_map = {
-                "afrispeak_female": 0,
-                "mbaza_tts": 1,
-                "afrispeak_male": 2,
-            }
-            spk = spk_map.get(source, 0)
-        else:
-            spk = int(spk)
         if not utt_id or not text:
             continue
         rows.append(
@@ -52,7 +68,7 @@ def read_manifest(path: Path) -> list[dict]:
                 "id": utt_id,
                 "text": text,
                 "audio_path": audio,
-                "speaker_id": spk,
+                "speaker_id": resolve_speaker_id(r),
             }
         )
     return rows
