@@ -53,8 +53,9 @@ export TORCH_HOME="${PROJECT_ROOT}/.cache/torch"
 mkdir -p "\$HUGGINGFACE_HUB_CACHE" "\$TORCH_HOME"
 
 cd "${REPO_ROOT}"
-# transformers==4.35.x needs hub<1; NeMo needs get_token (hub>=0.20).
-pip install -q jiwer "huggingface_hub>=0.23.2,<1.0" 2>/dev/null || true
+# Keep hub==0.17.x for transformers 4.35 / tokenizers 0.14.
+# score_tts_fleurs.py shims missing huggingface_hub.get_token for NeMo.
+pip install -q jiwer "huggingface_hub==0.17.3" 2>/dev/null || true
 nvidia-smi || true
 
 python scripts/score_tts_fleurs.py \\
