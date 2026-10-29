@@ -62,14 +62,15 @@ def patch_map_filter_cache_dir(cache_root: Path) -> None:
     cache_root.mkdir(parents=True, exist_ok=True)
     counter = {"i": 0}
 
-    def _next_prefix() -> str:
+    def _next_cache() -> str:
         counter["i"] += 1
-        return str(cache_root / f"e1_ds_{counter['i']:03d}")
+        # datasets num_proc>1 does cache_file_name.rindex(".") — must include a suffix.
+        return str(cache_root / f"e1_ds_{counter['i']:03d}.arrow")
 
     def _wrap(orig):
         def wrapped(self, *args, **kwargs):
             if kwargs.get("cache_file_name") is None:
-                kwargs["cache_file_name"] = _next_prefix()
+                kwargs["cache_file_name"] = _next_cache()
             return orig(self, *args, **kwargs)
 
         return wrapped
