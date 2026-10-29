@@ -35,8 +35,24 @@ def read_tsv(path: Path) -> list[dict]:
         return list(csv.DictReader(f, delimiter="\t"))
 
 
+def _patch_huggingface_hub_get_token() -> None:
+    """NeMo needs huggingface_hub.get_token; MMS pin may ship an older hub."""
+    import huggingface_hub as hh
+
+    if hasattr(hh, "get_token"):
+        return
+    try:
+        from huggingface_hub.utils import HfFolder  # type: ignore
+
+        hh.get_token = lambda: HfFolder.get_token()  # type: ignore[attr-defined]
+    except Exception:
+        hh.get_token = lambda: None  # type: ignore[attr-defined]
+
+
 def load_ctc(nemo_path: Path, device: str):
     import torch
+
+    _patch_huggingface_hub_get_token()
     from nemo.collections.asr.models import EncDecCTCModelBPE
 
     if not nemo_path.is_file():

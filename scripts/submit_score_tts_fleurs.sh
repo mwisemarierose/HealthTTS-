@@ -53,7 +53,7 @@ export TORCH_HOME="${PROJECT_ROOT}/.cache/torch"
 mkdir -p "\$HUGGINGFACE_HUB_CACHE" "\$TORCH_HOME"
 
 cd "${REPO_ROOT}"
-pip install -q jiwer 2>/dev/null || true
+pip install -q jiwer "huggingface_hub>=0.23.2" 2>/dev/null || true
 nvidia-smi || true
 
 python scripts/score_tts_fleurs.py \\
