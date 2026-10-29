@@ -16,6 +16,7 @@ BASELINES="${BASELINES:-$PROJECT_ROOT/tts_baselines}"
 HF_HOME="${HF_HOME:-$PROJECT_ROOT/.cache/huggingface}"
 FT_ROOT="${FT_ROOT:-$PROJECT_ROOT/code/finetune-hf-vits}"
 OUT_DIR="${OUT_DIR:-$BASELINES/finetune_e1_mms_kin}"
+LOG_DIR="${LOG_DIR:-$OUT_DIR}"
 CONFIG="${CONFIG:-$REPO_ROOT/configs/e1_mms_kin_finetune.json}"
 WANDB_PROJECT="${WANDB_PROJECT:-healthtts}"
 WANDB_RUN_NAME="${WANDB_RUN_NAME:-E1-mms-kin}"
@@ -30,9 +31,13 @@ SLURM_JOB_NAME="${SLURM_JOB_NAME:-e1-mms-kin}"
 INIT_CKPT="${INIT_CKPT:-$BASELINES/mms_tts_kin_train}"
 MMS_HF="${MMS_HF:-$PROJECT_ROOT/tts_data_cleaning/kin_mms_hf}"
 
-mkdir -p "$OUT_DIR" "$HF_HOME"
+mkdir -p "$OUT_DIR" "$HF_HOME" "$LOG_DIR"
+if ! touch "$OUT_DIR/.write_test" 2>/dev/null; then
+  echo "Cannot write to OUT_DIR=$OUT_DIR — /project may be full. df -h $OUT_DIR" >&2
+  exit 1
+fi
+rm -f "$OUT_DIR/.write_test"
 
-# Fail on login node before spending a GPU allocation.
 missing=0
 if [[ ! -f "$CONFIG" ]]; then
   echo "Missing config: $CONFIG" >&2
@@ -57,7 +62,8 @@ if [[ "$missing" -ne 0 ]]; then
   exit 1
 fi
 
-sbatch <<EOF
+JOB_SCRIPT="$OUT_DIR/e1_mms_kin.sbatch"
+cat > "$JOB_SCRIPT" <<EOF
 #!/bin/bash
 #SBATCH -p ${SLURM_PARTITION}
 #SBATCH --gres=gpu:${SLURM_GPUS}
@@ -65,7 +71,8 @@ sbatch <<EOF
 #SBATCH --cpus-per-task=${SLURM_CPUS}
 #SBATCH --mem=${SLURM_MEM}
 #SBATCH -J ${SLURM_JOB_NAME}
-#SBATCH -o ${OUT_DIR}/train_%j.log
+#SBATCH -o ${LOG_DIR}/train_%j.log
+#SBATCH -e ${LOG_DIR}/train_%j.err
 
 set -euo pipefail
 source "\${HOME}/miniforge3/etc/profile.d/conda.sh"
@@ -82,7 +89,7 @@ export WANDB_RUN_NAME="${WANDB_RUN_NAME}"
 export TMPDIR="/tmp/e1_mms_\${SLURM_JOB_ID}"
 export HF_DATASETS_CACHE="\$TMPDIR/hf_datasets"
 export DATASETS_CACHE="\$TMPDIR/hf_datasets"
-mkdir -p "\$TMPDIR" "\$HF_DATASETS_CACHE" "\$HUGGINGFACE_HUB_CACHE"
+mkdir -p "\$TMPDIR" "\$HF_DATASETS_CACHE" "\$HUGGINGFACE_HUB_CACHE" "${OUT_DIR}"
 
 cd "${REPO_ROOT}"
 pip install -q wandb 2>/dev/null || true
@@ -91,3 +98,9 @@ nvidia-smi || true
 python scripts/run_mms_finetune_e1.py --config "${CONFIG}" --finetune_root "${FT_ROOT}"
 echo DONE_E1
 EOF
+
+echo "Submitting: partition=${SLURM_PARTITION} time=${SLURM_TIME} mem=${SLURM_MEM} cpus=${SLURM_CPUS} gpus=${SLURM_GPUS}"
+echo "Job script:  $JOB_SCRIPT"
+echo "Logs/ckpts:  $OUT_DIR"
+df -h "$PROJECT_ROOT" | tail -1
+sbatch "$JOB_SCRIPT"
