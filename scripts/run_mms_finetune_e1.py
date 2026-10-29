@@ -54,6 +54,26 @@ def patch_load_dataset_for_disk() -> None:
     datasets.load_dataset = load_dataset  # type: ignore[assignment]
 
 
+def patch_finetune_plot_matplotlib(ft_root: Path) -> None:
+    """Matplotlib 3.8+ removed FigureCanvasAgg.tostring_rgb — used at eval logging."""
+    plot_py = ft_root / "utils" / "plot.py"
+    if not plot_py.is_file():
+        return
+    text = plot_py.read_text(encoding="utf-8")
+    if "buffer_rgba" in text:
+        print(f"plot.py already matplotlib-safe: {plot_py}")
+        return
+    old = "data = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)\n    data = data.reshape(fig.canvas.get_width_height()[::-1] + (3,))"
+    new = (
+        "buf = np.asarray(fig.canvas.buffer_rgba())\n"
+        "    data = buf[:, :, :3]"
+    )
+    if old not in text:
+        raise SystemExit(f"Could not patch tostring_rgb in {plot_py}")
+    plot_py.write_text(text.replace(old, new), encoding="utf-8")
+    print(f"Patched matplotlib tostring_rgb → buffer_rgba in {plot_py}")
+
+
 def patch_map_filter_cache_dir(cache_root: Path) -> None:
     """Force map/filter Arrow outputs under cache_root (not next to load_from_disk)."""
     from datasets import Dataset
@@ -122,13 +142,29 @@ def main() -> None:
         or os.environ.get("E1_SCRATCH")
         or tempfile.gettempdir()
     )
+    patch_finetune_plot_matplotlib(ft)
     patch_load_dataset_for_disk()
     patch_map_filter_cache_dir(cache_root)
 
+    # Resume if a prior checkpoint exists (e.g. crash at first eval).
+    out_dir = Path(cfg["output_dir"])
+    ckpts = sorted(
+        (p for p in out_dir.glob("checkpoint-*") if p.is_dir()),
+        key=lambda p: int(p.name.split("-")[-1]),
+    )
+    runtime_cfg = args.config
+    if ckpts:
+        cfg["resume_from_checkpoint"] = str(ckpts[-1])
+        runtime_cfg = Path(
+            os.environ.get("TMPDIR") or tempfile.gettempdir()
+        ) / "e1_mms_runtime_resume.json"
+        runtime_cfg.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
+        print(f"Resuming from {ckpts[-1]}")
+
     sys.path.insert(0, str(ft))
     os.chdir(ft)
-    sys.argv = [str(train_script), str(args.config.resolve())]
-    print(f"Launching {train_script} with {args.config}")
+    sys.argv = [str(train_script), str(runtime_cfg.resolve())]
+    print(f"Launching {train_script} with {runtime_cfg}")
     runpy.run_path(str(train_script), run_name="__main__")
 
 
