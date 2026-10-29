@@ -27,7 +27,35 @@ SLURM_CPUS="${SLURM_CPUS:-8}"
 SLURM_GPUS="${SLURM_GPUS:-1}"
 SLURM_JOB_NAME="${SLURM_JOB_NAME:-e1-mms-kin}"
 
+INIT_CKPT="${INIT_CKPT:-$BASELINES/mms_tts_kin_train}"
+MMS_HF="${MMS_HF:-$PROJECT_ROOT/tts_data_cleaning/kin_mms_hf}"
+
 mkdir -p "$OUT_DIR" "$HF_HOME"
+
+# Fail on login node before spending a GPU allocation.
+missing=0
+if [[ ! -f "$CONFIG" ]]; then
+  echo "Missing config: $CONFIG" >&2
+  missing=1
+fi
+if [[ ! -f "$INIT_CKPT/config.json" ]]; then
+  echo "Missing trainable MMS Kin ckpt at $INIT_CKPT" >&2
+  echo "Run: bash scripts/setup_mms_finetune.sh" >&2
+  missing=1
+fi
+if [[ ! -f "$MMS_HF/dataset_dict.json" ]]; then
+  echo "Missing MMS HF dataset at $MMS_HF" >&2
+  echo "Run: python scripts/export_kin_train_datasets.py" >&2
+  missing=1
+fi
+if [[ ! -f "$FT_ROOT/run_vits_finetuning.py" ]]; then
+  echo "Missing finetune-hf-vits at $FT_ROOT" >&2
+  echo "Run: bash scripts/setup_mms_finetune.sh" >&2
+  missing=1
+fi
+if [[ "$missing" -ne 0 ]]; then
+  exit 1
+fi
 
 sbatch <<EOF
 #!/bin/bash
