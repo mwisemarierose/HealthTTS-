@@ -1,0 +1,6 @@
+# Shared W&B settings for HealthTTS fine-tunes (E1–E6).
+project: healthtts
+entity: null   # set to your wandb username/team, or leave null
+tags:
+  - healthtts
+  - tts

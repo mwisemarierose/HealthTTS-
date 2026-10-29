@@ -119,6 +119,39 @@ SYNTH_DIR=$BASELINES/eval_kidawida/kinya_flex_tts/test \
 
 Outputs under `$BASELINES/eval_kidawida/{mms_tts_kin,kinya_flex_tts}/test/`.
 
+### E1 / E2 — Kinyarwanda-only fine-tuning
+
+Train on combined Kin `train.csv` (~17.89 h); validate on combined `dev.csv`. Init from B0/B1.  
+**W&B:** project `healthtts` (runs `E1-mms-kin`, `E2-flex-kin`). Same project for later E3–E6.
+
+```bash
+conda activate healthtts
+cd ~/HealthTTS
+export BASELINES=/project/community/rmwisene/tts_baselines
+export PROJECT_ROOT=/project/community/rmwisene
+export WANDB_PROJECT=healthtts
+
+# once per machine / login
+pip install -q wandb
+wandb login
+
+# 0) Export train/dev for both trainers (Flex resamples to 24 kHz — slow once)
+python scripts/export_kin_train_datasets.py
+# smoke: python scripts/export_kin_train_datasets.py --limit 50
+
+# --- E1 MMS (ylacombe/finetune-hf-vits) ---
+bash scripts/setup_mms_finetune.sh          # once: clone + convert kin discriminator
+bash scripts/submit_train_mms_e1.sh         # 30 epochs → $BASELINES/finetune_e1_mms_kin
+
+# --- E2 Flex (DeepKIN + W&B wrapper) ---
+bash scripts/setup_deepkin.sh               # once if needed
+bash scripts/submit_train_flex_e2.sh        # ~25k iters ≈ 30 ep → $BASELINES/finetune_e2_flex_kin
+```
+
+Watch live: https://wandb.ai/ (project **healthtts**). Slurm logs still under `$BASELINES/finetune_e*/train_*.log`.
+
+After training, re-eval FLEURS + Kin tests + (optional) Kidaw’ida zero-shot using the new checkpoints (point `--model_dir` / `--checkpoint` at the E1/E2 outputs).
+
 ## Environment
 
 ```bash

@@ -1,0 +1,28 @@
+# E2: Fine-tune Kinya-Flex on Kin pool (DeepKIN flex_trainer).
+# Official val/dev audio stays in Kin manifests; Flex needs 24 kHz PSV from export.
+
+experiment: E2
+init_checkpoint: /project/community/rmwisene/tts_baselines/kinya_flex_tts/kinya_flex_tts_base_trained.pt
+tts_data_dir: /project/community/rmwisene/tts_data_cleaning/kin_flex_data
+tts_train_data_file: tts_train_data.psv
+# DeepKIN validates from a fraction of train unless you wire a separate loader;
+# we still export tts_dev_data.psv for analysis / future hooks.
+tts_dev_data_file: tts_dev_data.psv
+model_save_path: /project/community/rmwisene/tts_baselines/finetune_e2_flex_kin/kinya_flex_tts_e2.pt
+
+# ~30 epochs on ~13.6k clips, batch 8, accum 2 → ~850 steps/epoch → ~25k iters
+model_variant: flex_tts:base
+gpus: 1
+enable_amp: false
+use_ddp: false
+batch_size: 8
+accumulation_steps: 2
+num_iters: 25000
+warmup_iter: 1000
+peak_lr: 2.0e-4
+checkpoint_steps: 1000
+validation_steps: 2000
+train_log_steps: 20
+load_saved_model: true
+dataloader_num_workers: 4
+num_losses: 8

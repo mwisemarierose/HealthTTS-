@@ -1,0 +1,55 @@
+{
+  "project_name": "healthtts",
+  "run_name": "E1-mms-kin",
+  "push_to_hub": false,
+  "report_to": ["wandb"],
+  "overwrite_output_dir": true,
+  "output_dir": "/project/community/rmwisene/tts_baselines/finetune_e1_mms_kin",
+
+  "dataset_name": "/project/community/rmwisene/tts_data_cleaning/kin_mms_hf",
+  "dataset_config_name": null,
+  "audio_column_name": "audio",
+  "text_column_name": "text",
+  "train_split_name": "train",
+  "eval_split_name": "validation",
+  "speaker_id_column_name": "speaker_id",
+  "override_speaker_embeddings": true,
+
+  "full_generation_sample_text": "Muraho, amakuru yawe ni meza.",
+
+  "max_duration_in_seconds": 20,
+  "min_duration_in_seconds": 0.3,
+  "max_tokens_length": 500,
+
+  "model_name_or_path": "/project/community/rmwisene/tts_baselines/mms_tts_kin_train",
+
+  "preprocessing_num_workers": 4,
+
+  "do_train": true,
+  "num_train_epochs": 30,
+  "gradient_accumulation_steps": 1,
+  "gradient_checkpointing": false,
+  "per_device_train_batch_size": 8,
+  "learning_rate": 2e-5,
+  "adam_beta1": 0.8,
+  "adam_beta2": 0.99,
+  "warmup_ratio": 0.01,
+  "group_by_length": false,
+
+  "do_eval": true,
+  "eval_steps": 500,
+  "save_steps": 500,
+  "per_device_eval_batch_size": 8,
+  "max_eval_samples": 100,
+  "do_step_schedule_per_epoch": true,
+
+  "weight_disc": 3,
+  "weight_fmaps": 1,
+  "weight_gen": 1,
+  "weight_kl": 1.5,
+  "weight_duration": 1,
+  "weight_mel": 35,
+
+  "fp16": true,
+  "seed": 42
+}

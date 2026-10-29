@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# E1: Fine-tune MMS-TTS-Kin on Kin pool only (~30 epochs) + W&B.
+#
+# Prereqs (once):
+#   wandb login
+#   bash scripts/setup_mms_finetune.sh
+#   python scripts/export_kin_train_datasets.py
+#
+#   bash scripts/submit_train_mms_e1.sh
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROJECT_ROOT="${PROJECT_ROOT:-/project/community/rmwisene}"
+BASELINES="${BASELINES:-$PROJECT_ROOT/tts_baselines}"
+HF_HOME="${HF_HOME:-$PROJECT_ROOT/.cache/huggingface}"
+FT_ROOT="${FT_ROOT:-$PROJECT_ROOT/code/finetune-hf-vits}"
+OUT_DIR="${OUT_DIR:-$BASELINES/finetune_e1_mms_kin}"
+CONFIG="${CONFIG:-$REPO_ROOT/configs/e1_mms_kin_finetune.json}"
+WANDB_PROJECT="${WANDB_PROJECT:-healthtts}"
+WANDB_RUN_NAME="${WANDB_RUN_NAME:-E1-mms-kin}"
+
+SLURM_PARTITION="${SLURM_PARTITION:-general}"
+SLURM_TIME="${SLURM_TIME:-48:00:00}"
+SLURM_MEM="${SLURM_MEM:-64G}"
+SLURM_CPUS="${SLURM_CPUS:-8}"
+SLURM_GPUS="${SLURM_GPUS:-1}"
+SLURM_JOB_NAME="${SLURM_JOB_NAME:-e1-mms-kin}"
+
+mkdir -p "$OUT_DIR" "$HF_HOME"
+
+sbatch <<EOF
+#!/bin/bash
+#SBATCH -p ${SLURM_PARTITION}
+#SBATCH --gres=gpu:${SLURM_GPUS}
+#SBATCH --time=${SLURM_TIME}
+#SBATCH --cpus-per-task=${SLURM_CPUS}
+#SBATCH --mem=${SLURM_MEM}
+#SBATCH -J ${SLURM_JOB_NAME}
+#SBATCH -o ${OUT_DIR}/train_%j.log
+
+set -euo pipefail
+source "\${HOME}/miniforge3/etc/profile.d/conda.sh"
+conda activate healthtts
+
+export BASELINES="${BASELINES}"
+export HF_HOME="${HF_HOME}"
+export FT_ROOT="${FT_ROOT}"
+export HUGGINGFACE_HUB_CACHE="${HF_HOME}/hub"
+export TRANSFORMERS_CACHE="${HF_HOME}"
+export WANDB_PROJECT="${WANDB_PROJECT}"
+export WANDB_NAME="${WANDB_RUN_NAME}"
+export WANDB_RUN_NAME="${WANDB_RUN_NAME}"
+export TMPDIR="/tmp/e1_mms_\${SLURM_JOB_ID}"
+mkdir -p "\$TMPDIR" "\$HUGGINGFACE_HUB_CACHE"
+
+cd "${REPO_ROOT}"
+pip install -q wandb 2>/dev/null || true
+nvidia-smi || true
+
+python scripts/run_mms_finetune_e1.py --config "${CONFIG}" --finetune_root "${FT_ROOT}"
+echo DONE_E1
+EOF
