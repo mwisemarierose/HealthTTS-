@@ -54,6 +54,110 @@ def patch_load_dataset_for_disk() -> None:
     datasets.load_dataset = load_dataset  # type: ignore[assignment]
 
 
+def print_run_banner(cfg: dict, resume_step: int | None) -> None:
+    epochs = int(cfg.get("num_train_epochs", 30))
+    # From prior runs: ~50370 steps / 30 epochs ≈ 1679 steps/epoch
+    steps_per_epoch = int(os.environ.get("E1_STEPS_PER_EPOCH", "1679"))
+    total_steps = steps_per_epoch * epochs
+    step = resume_step or 0
+    epoch_f = step / steps_per_epoch if steps_per_epoch else 0.0
+    print("=" * 72)
+    print("E1_STATUS: PHASE=launch")
+    print(f"E1_STATUS: run={cfg.get('run_name')}  project={cfg.get('project_name')}")
+    print(f"E1_STATUS: output_dir={cfg.get('output_dir')}")
+    if resume_step is not None:
+        print(f"E1_STATUS: resume_step={resume_step}  ≈epoch {epoch_f:.2f}/{epochs}")
+        print("E1_STATUS: next=preprocess_or_load_cache → then continue TRAINING")
+    else:
+        print(f"E1_STATUS: start_step=0  epochs={epochs}  (~{total_steps} steps)")
+        print("E1_STATUS: next=preprocess → TRAINING")
+    print(
+        "E1_STATUS: phases you will see: "
+        "preprocess | train_epoch_start | train_step | "
+        "validation_eval (held-out batches) | save_checkpoint"
+    )
+    print(f"E1_STATUS: epoch≈ step/{steps_per_epoch}   (eval every {cfg.get('eval_steps')} steps)")
+    print("=" * 72, flush=True)
+
+
+def patch_vits_status_logging(ft_root: Path) -> None:
+    """Make run_vits_finetuning.py print clear E1_STATUS lines with epoch/step/phase."""
+    path = ft_root / "run_vits_finetuning.py"
+    text = path.read_text(encoding="utf-8")
+    if "E1_STATUS: PHASE=train_epoch_start" in text:
+        print(f"status logging already patched: {path}")
+        return
+
+    reps_once = [
+        (
+            "for epoch in range(first_epoch, training_args.num_train_epochs):\n"
+            "        # keep track of train losses\n",
+            "for epoch in range(first_epoch, training_args.num_train_epochs):\n"
+            "        logger.info(\n"
+            '            f"E1_STATUS: PHASE=train_epoch_start | '
+            "epoch={epoch+1}/{int(training_args.num_train_epochs)} | "
+            'step={global_step}/{training_args.max_steps}"\n'
+            "        )\n"
+            "        # keep track of train losses\n",
+        ),
+        (
+            'logger.info(f"Saved state to {save_path}")',
+            'logger.info(f"Saved state to {save_path}")\n'
+            "                    logger.info(\n"
+            '                        f"E1_STATUS: PHASE=save_checkpoint | '
+            "epoch≈{(global_step / max(num_update_steps_per_epoch, 1)):.2f}/"
+            "{int(training_args.num_train_epochs)} | "
+            'step={global_step} | path={save_path}"\n'
+            "                    )",
+        ),
+        (
+            'logger.info("***** Running training *****")',
+            'logger.info("***** Running training *****")\n'
+            '    logger.info("E1_STATUS: PHASE=train_loop_starting")',
+        ),
+    ]
+    new = text
+    for old, repl in reps_once:
+        if old not in new:
+            raise SystemExit(f"status patch failed, missing snippet in {path}:\n{old[:120]}...")
+        new = new.replace(old, repl, 1)
+
+    # These strings appear in mid-train and final validation — replace all.
+    reps_all = [
+        (
+            'logger.info("Running validation... ")',
+            'logger.info(f"E1_STATUS: PHASE=validation_eval | epoch={epoch+1}/{int(training_args.num_train_epochs)} | step={global_step}/{training_args.max_steps} | action=held-out_synth+metrics")',
+        ),
+        (
+            'logger.info("Running final validation... ")',
+            'logger.info(f"E1_STATUS: PHASE=validation_eval_final | epoch={epoch}/{int(training_args.num_train_epochs)} | step={global_step}/{training_args.max_steps} | action=held-out_synth+metrics")',
+        ),
+        (
+            "VALIDATION - batch {step}, process{accelerator.process_index}, waveform {(batch['waveform'].shape)}, tokens {(batch['input_ids'].shape)}... ",
+            "E1_STATUS: PHASE=validation_batch | epoch={epoch+1}/{int(training_args.num_train_epochs)} | step={global_step} | eval_batch={step} | waveform={batch['waveform'].shape} tokens={batch['input_ids'].shape}",
+        ),
+        (
+            "VALIDATION - batch {step}, process{accelerator.process_index}, PADDING AND GATHER... ",
+            "E1_STATUS: PHASE=validation_batch | epoch={epoch+1}/{int(training_args.num_train_epochs)} | step={global_step} | eval_batch={step} | action=pad_and_gather",
+        ),
+        (
+            'logger.info("Validation inference done, now evaluating... ")',
+            'logger.info(f"E1_STATUS: PHASE=validation_score | epoch={epoch+1}/{int(training_args.num_train_epochs)} | step={global_step} | action=plot_and_log_metrics")',
+        ),
+        (
+            'logger.info("Validation finished... ")',
+            'logger.info(f"E1_STATUS: PHASE=validation_done | epoch={epoch+1}/{int(training_args.num_train_epochs)} | step={global_step} | next=resume_training")',
+        ),
+    ]
+    for old, repl in reps_all:
+        if old not in new:
+            raise SystemExit(f"status patch failed, missing snippet in {path}:\n{old[:160]}...")
+        new = new.replace(old, repl)
+
+    path.write_text(new, encoding="utf-8")
+    print(f"Patched clear E1_STATUS logging in {path}")
+
+
 def patch_finetune_plot_matplotlib(ft_root: Path) -> None:
     """Matplotlib 3.8+ removed FigureCanvasAgg.tostring_rgb — used at eval logging."""
     plot_py = ft_root / "utils" / "plot.py"
@@ -143,6 +247,7 @@ def main() -> None:
         or tempfile.gettempdir()
     )
     patch_finetune_plot_matplotlib(ft)
+    patch_vits_status_logging(ft)
     patch_load_dataset_for_disk()
     patch_map_filter_cache_dir(cache_root)
 
@@ -153,7 +258,9 @@ def main() -> None:
         key=lambda p: int(p.name.split("-")[-1]),
     )
     runtime_cfg = args.config
+    resume_step = None
     if ckpts:
+        resume_step = int(ckpts[-1].name.split("-")[-1])
         cfg["resume_from_checkpoint"] = str(ckpts[-1])
         runtime_cfg = Path(
             os.environ.get("TMPDIR") or tempfile.gettempdir()
@@ -161,10 +268,13 @@ def main() -> None:
         runtime_cfg.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
         print(f"Resuming from {ckpts[-1]}")
 
+    print_run_banner(cfg, resume_step)
+    print("E1_STATUS: PHASE=preprocess_or_load_cache | action=filter+map_audio_features")
+
     sys.path.insert(0, str(ft))
     os.chdir(ft)
     sys.argv = [str(train_script), str(runtime_cfg.resolve())]
-    print(f"Launching {train_script} with {runtime_cfg}")
+    print(f"Launching {train_script} with {runtime_cfg}", flush=True)
     runpy.run_path(str(train_script), run_name="__main__")
 
 

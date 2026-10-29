@@ -86,15 +86,23 @@ export TRANSFORMERS_CACHE="${HF_HOME}"
 export WANDB_PROJECT="${WANDB_PROJECT}"
 export WANDB_NAME="${WANDB_RUN_NAME}"
 export WANDB_RUN_NAME="${WANDB_RUN_NAME}"
-# Persist map/filter Arrow caches on community so resume jobs skip ~15min preprocess.
-# (Node /tmp is wiped every job; home is 25GB quota.) Source kin_mms_hf unchanged.
-export E1_SCRATCH="${BASELINES}/e1_map_cache"
+# Map caches are ~14G — do NOT keep on /project (fills shared NFS).
+# Compute-node /tmp is ~6TB SSD; rebuilt each job (~15min) but ckpts fit on community.
+# Home is 25GB quota — never use it for caches.
 export TMPDIR="/tmp/e1_mms_\${SLURM_JOB_ID}"
-export HF_DATASETS_CACHE="\$E1_SCRATCH"
-export DATASETS_CACHE="\$E1_SCRATCH"
-mkdir -p "\$TMPDIR" "\$E1_SCRATCH" "\$HUGGINGFACE_HUB_CACHE" "${OUT_DIR}"
-df -h /tmp /project/community | tail -5 || true
-echo "Persistent preprocess cache: \$E1_SCRATCH"
+export HF_DATASETS_CACHE="\$TMPDIR/hf_datasets"
+export DATASETS_CACHE="\$HF_DATASETS_CACHE"
+export WANDB_DIR="\$TMPDIR/wandb"
+export WANDB_CACHE_DIR="\$TMPDIR/wandb_cache"
+export WANDB_CONFIG_DIR="\$TMPDIR/wandb_config"
+export WANDB_CONSOLE=off
+mkdir -p "\$TMPDIR" "\$HF_DATASETS_CACHE" "\$HUGGINGFACE_HUB_CACHE" "${OUT_DIR}" \
+  "\$WANDB_DIR" "\$WANDB_CACHE_DIR" "\$WANDB_CONFIG_DIR"
+# Drop any leftover community map cache from older runs (safe; slows next preprocess only).
+rm -rf "${BASELINES}/e1_map_cache" 2>/dev/null || true
+df -h /tmp /project/community ~ 2>/dev/null | tail -8 || true
+echo "Preprocess cache (node-local): \$HF_DATASETS_CACHE"
+echo "WANDB local dir: \$WANDB_DIR (console off)"
 
 cd "${REPO_ROOT}"
 pip install -q wandb 2>/dev/null || true
