@@ -28,13 +28,21 @@ cd "$FT_ROOT"
 
 # ylacombe/finetune-hf-vits is pinned to ~4.35; newer transformers VitsConfig
 # raises AttributeError on missing pad_token_id during discriminator convert.
-echo "Pinning transformers/datasets/accelerate for MMS finetune …"
+# datasets 2.14.x also needs NumPy 1.x (np.array(..., copy=False) breaks on NumPy 2).
+echo "Pinning transformers/datasets/accelerate/numpy for MMS finetune …"
 pip install -q --upgrade \
+  "numpy==1.26.4" \
   "transformers==4.35.1" \
   "datasets[audio]==2.14.7" \
   "accelerate==0.24.1"
 pip install -q -r requirements.txt
 pip install -q Cython wandb
+# Re-assert pins in case requirements.txt floated them.
+pip install -q \
+  "numpy==1.26.4" \
+  "transformers==4.35.1" \
+  "datasets[audio]==2.14.7" \
+  "accelerate==0.24.1"
 
 # Ensure local VitsConfig always exposes pad_token_id (MMS pad id = 0).
 python - <<'PY'
