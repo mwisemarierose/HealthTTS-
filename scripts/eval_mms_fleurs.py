@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-"""Run MMS-TTS Kin baseline synthesis on cleaned FLEURS eval texts.
+"""Run MMS-TTS Kin synthesis on eval manifests (FLEURS TSV or Kin-pool CSV).
 
-FLEURS is evaluation-only — this does NOT train. It synthesizes from
-cleaned manifests (test/dev) for listening / later ASR-based metrics.
+FLEURS / Kidaw’ida TSV columns: id, text, audio_path
+Kin pool CSV columns: utt_id, text, audio_path, speaker_id (optional)
 
-  conda activate healthtts
-  export BASELINES=/project/community/rmwisene/tts_baselines
-  export HF_HOME=/project/community/rmwisene/.cache/huggingface
+  # Kin training-pool dev (E1 checkpoint = output_dir after save_pretrained)
+  python scripts/eval_mms_fleurs.py \\
+    --manifest_dir /project/community/rmwisene/tts_data_cleaning/kinyarwanda_tts_mbaza_afrispeak/manifests \\
+    --split dev \\
+    --model_dir /project/community/rmwisene/tts_baselines/finetune_e1_mms_kin \\
+    --out_dir /project/community/rmwisene/tts_baselines/eval_kin_dev/mms_e1
 
-  # small smoke (20 utts)
+  # FLEURS test (zero-shot baseline)
   python scripts/eval_mms_fleurs.py --split test --limit 20
-
-  # full test split
-  python scripts/eval_mms_fleurs.py --split test
 """
 from __future__ import annotations
 
@@ -24,8 +24,51 @@ from pathlib import Path
 
 
 def read_manifest(path: Path) -> list[dict]:
+    """Normalize rows to id, text, audio_path, speaker_id."""
+    delim = "\t" if path.suffix.lower() == ".tsv" else ","
     with path.open(encoding="utf-8", newline="") as f:
-        return list(csv.DictReader(f, delimiter="\t"))
+        raw = list(csv.DictReader(f, delimiter=delim))
+    rows = []
+    for r in raw:
+        utt_id = (r.get("id") or r.get("utt_id") or "").strip()
+        text = (r.get("text") or "").strip()
+        audio = (r.get("audio_path") or r.get("path") or "").strip()
+        spk = r.get("speaker_id", "")
+        if spk is None or str(spk).strip() == "":
+            # Kin pool uses source names in some exports
+            source = (r.get("source") or "").strip()
+            spk_map = {
+                "afrispeak_female": 0,
+                "mbaza_tts": 1,
+                "afrispeak_male": 2,
+            }
+            spk = spk_map.get(source, 0)
+        else:
+            spk = int(spk)
+        if not utt_id or not text:
+            continue
+        rows.append(
+            {
+                "id": utt_id,
+                "text": text,
+                "audio_path": audio,
+                "speaker_id": spk,
+            }
+        )
+    return rows
+
+
+def resolve_manifest(manifest_dir: Path, split: str) -> Path:
+    for name in (f"{split}.tsv", f"{split}.csv"):
+        p = manifest_dir / name
+        if p.is_file():
+            return p
+    raise SystemExit(
+        f"Missing {manifest_dir}/{split}.tsv|csv\n"
+        "FLEURS: python scripts/clean_fleurs_eval.py | "
+        "Kidaw’ida: python scripts/prepare_kidawida_eval_manifest.py | "
+        "Kin pool: manifests under tts_data_cleaning/kinyarwanda_tts_mbaza_afrispeak/manifests"
+    )
 
 
 def main() -> None:
@@ -37,7 +80,7 @@ def main() -> None:
     p.add_argument(
         "--split",
         default="test",
-        help="Manifest basename without .tsv (test/dev; also Kidaw’ida eval)",
+        help="Manifest basename without extension (test/dev)",
     )
     p.add_argument(
         "--model_dir",
@@ -51,20 +94,19 @@ def main() -> None:
     )
     p.add_argument("--limit", type=int, default=0, help="0 = all rows")
     p.add_argument("--device", default="cuda")
+    p.add_argument(
+        "--speaker_id",
+        type=int,
+        default=-1,
+        help="Force speaker id for all utts (-1 = use row / default 0)",
+    )
     args = p.parse_args()
 
     import torch
     import scipy.io.wavfile
     from transformers import VitsModel, AutoTokenizer
 
-    manifest = Path(args.manifest_dir) / f"{args.split}.tsv"
-    if not manifest.is_file():
-        raise SystemExit(
-            f"Missing {manifest}. "
-            "FLEURS: python scripts/clean_fleurs_eval.py | "
-            "Kidaw’ida: python scripts/prepare_kidawida_eval_manifest.py"
-        )
-
+    manifest = resolve_manifest(Path(args.manifest_dir), args.split)
     rows = read_manifest(manifest)
     if args.limit and args.limit > 0:
         rows = rows[: args.limit]
@@ -78,11 +120,13 @@ def main() -> None:
         print("CUDA not available — using CPU")
         device = "cpu"
 
+    print(f"Manifest: {manifest}  (n={len(rows)})")
     print(f"Loading {model_dir} on {device} …")
     model = VitsModel.from_pretrained(str(model_dir)).to(device)
     tokenizer = AutoTokenizer.from_pretrained(str(model_dir))
     model.eval()
     rate = int(model.config.sampling_rate)
+    multi_spk = int(getattr(model.config, "num_speakers", 1) or 1) > 1
 
     meta_path = out_dir / "synthesis.tsv"
     with meta_path.open("w", encoding="utf-8", newline="") as mf:
@@ -93,6 +137,7 @@ def main() -> None:
                 "text",
                 "ref_audio",
                 "hyp_audio",
+                "speaker_id",
                 "duration_s",
                 "synth_time_s",
                 "rtf",
@@ -104,9 +149,12 @@ def main() -> None:
         for i, row in enumerate(rows, 1):
             utt_id = row["id"]
             text = row["text"]
+            spk = args.speaker_id if args.speaker_id >= 0 else int(row["speaker_id"])
             hyp = out_dir / f"{utt_id}.wav"
             inputs = tokenizer(text, return_tensors="pt")
             inputs = {k: v.to(device) for k, v in inputs.items()}
+            if multi_spk:
+                inputs["speaker_id"] = torch.tensor([spk], device=device)
             if device == "cuda":
                 torch.cuda.synchronize()
             t0 = time.perf_counter()
@@ -125,6 +173,7 @@ def main() -> None:
                     "text": text,
                     "ref_audio": row.get("audio_path", ""),
                     "hyp_audio": str(hyp.resolve()),
+                    "speaker_id": spk,
                     "duration_s": f"{dur:.3f}",
                     "synth_time_s": f"{synth_time:.4f}",
                     "rtf": f"{rtf:.4f}",
@@ -132,7 +181,7 @@ def main() -> None:
             )
             if i % 10 == 0 or i == len(rows):
                 print(
-                    f"  [{i}/{len(rows)}] {utt_id} "
+                    f"  [{i}/{len(rows)}] {utt_id} spk={spk} "
                     f"({dur:.2f}s audio, {synth_time:.3f}s synth, RTF={rtf:.3f})"
                 )
 

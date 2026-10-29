@@ -11,6 +11,7 @@ PROJECT_ROOT="${PROJECT_ROOT:-/project/community/rmwisene}"
 BASELINES="${BASELINES:-$PROJECT_ROOT/tts_baselines}"
 HF_HOME="${HF_HOME:-$PROJECT_ROOT/.cache/huggingface}"
 SYNTH_DIR="${SYNTH_DIR:-$BASELINES/eval_fleurs/mms_tts_kin/test}"
+TTS_MODEL_DIR="${TTS_MODEL_DIR:-$BASELINES/mms_tts_kin}"
 CTC_NEMO="${CTC_NEMO:-$PROJECT_ROOT/asr/combined-ctc-15-ep-nocl.nemo}"
 
 SLURM_PARTITION="${SLURM_PARTITION:-general}"
@@ -58,7 +59,7 @@ nvidia-smi || true
 python scripts/score_tts_fleurs.py \\
   --synth_dir "${SYNTH_DIR}" \\
   --asr_nemo "${CTC_NEMO}" \\
-  --tts_model_dir "${BASELINES}/mms_tts_kin" \\
+  --tts_model_dir "${TTS_MODEL_DIR}" \\
   $( [[ "${RETIME}" == "1" ]] && echo --retime ) \\
   --device cuda
 
