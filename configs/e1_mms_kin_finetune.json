@@ -23,7 +23,7 @@
 
   "model_name_or_path": "/project/community/rmwisene/tts_baselines/mms_tts_kin_train",
 
-  "preprocessing_num_workers": 4,
+  "preprocessing_num_workers": 3,
 
   "do_train": true,
   "num_train_epochs": 30,
