@@ -4,6 +4,10 @@
 Patches datasets.load_dataset so local DatasetDict paths from
 export_kin_train_datasets.py work with run_vits_finetuning.py.
 
+Copies the HF dataset metadata to $TMPDIR (or HF_DATASETS_CACHE) so
+datasets.map() cache arrow files do NOT fill /project (map writes
+cache next to load_from_disk roots).
+
   python scripts/run_mms_finetune_e1.py
   python scripts/run_mms_finetune_e1.py --config configs/e1_mms_kin_finetune.json
 """
@@ -13,7 +17,9 @@ import argparse
 import json
 import os
 import runpy
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -32,7 +38,6 @@ def patch_load_dataset_for_disk() -> None:
             if isinstance(ds, DatasetDict):
                 if split is None:
                     return ds
-                # HF split names used in our export
                 if split in ds:
                     return ds[split]
                 aliases = {
@@ -48,6 +53,22 @@ def patch_load_dataset_for_disk() -> None:
         return orig(path, name, split=split, **kwargs)
 
     datasets.load_dataset = load_dataset  # type: ignore[assignment]
+
+
+def stage_dataset_on_tmp(src: Path) -> Path:
+    """Copy HF export to local scratch so map() caches stay off /project."""
+    root = Path(
+        os.environ.get("HF_DATASETS_CACHE")
+        or os.environ.get("TMPDIR")
+        or tempfile.gettempdir()
+    )
+    root.mkdir(parents=True, exist_ok=True)
+    dst = root / "kin_mms_hf_staged"
+    if dst.exists():
+        shutil.rmtree(dst)
+    print(f"Staging dataset {src} → {dst} (map caches will land here, not on /project)")
+    shutil.copytree(src, dst)
+    return dst
 
 
 def main() -> None:
@@ -87,12 +108,17 @@ def main() -> None:
     if not train_script.is_file():
         raise SystemExit(f"Missing {train_script}\nRun: bash scripts/setup_mms_finetune.sh")
 
+    # Keep preprocess arrow caches on node-local disk.
+    staged = stage_dataset_on_tmp(ds_path)
+    cfg["dataset_name"] = str(staged)
+    runtime_cfg = Path(os.environ.get("TMPDIR", "/tmp")) / "e1_mms_runtime.json"
+    runtime_cfg.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
+
     patch_load_dataset_for_disk()
     sys.path.insert(0, str(ft))
     os.chdir(ft)
-    # run_vits_finetuning expects a json path as argv
-    sys.argv = [str(train_script), str(args.config.resolve())]
-    print(f"Launching {train_script} with {args.config}")
+    sys.argv = [str(train_script), str(runtime_cfg)]
+    print(f"Launching {train_script} with {runtime_cfg}")
     runpy.run_path(str(train_script), run_name="__main__")
 
 
