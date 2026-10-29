@@ -86,16 +86,17 @@ export TRANSFORMERS_CACHE="${HF_HOME}"
 export WANDB_PROJECT="${WANDB_PROJECT}"
 export WANDB_NAME="${WANDB_RUN_NAME}"
 export WANDB_RUN_NAME="${WANDB_RUN_NAME}"
-# Login /tmp is a tiny full tmpfs (6G). Map() caches are multi-GB and must
-# NOT land on /project. Use \$HOME scratch for this job only, then delete.
-export E1_SCRATCH="\${HOME}/.cache/healthtts_e1_scratch_\${SLURM_JOB_ID}"
-export TMPDIR="\$E1_SCRATCH/tmp"
+# Orchard: login /tmp is a tiny tmpfs; compute-node /tmp is local ~6TB SSD.
+# Home is 25GB quota — never put map caches there. Community holds ckpts only.
+# Source kin_mms_hf stays on /project; map/filter Arrow caches go to node /tmp.
+export E1_SCRATCH="/tmp/e1_mms_\${SLURM_JOB_ID}"
+export TMPDIR="\$E1_SCRATCH"
 export HF_DATASETS_CACHE="\$E1_SCRATCH/hf_datasets"
 export DATASETS_CACHE="\$HF_DATASETS_CACHE"
 mkdir -p "\$TMPDIR" "\$HF_DATASETS_CACHE" "\$HUGGINGFACE_HUB_CACHE" "${OUT_DIR}"
 cleanup_scratch() { rm -rf "\$E1_SCRATCH"; }
 trap cleanup_scratch EXIT
-df -h "\$HOME" /project/community | tail -5 || true
+df -h /tmp /project/community | tail -5 || true
 
 cd "${REPO_ROOT}"
 pip install -q wandb 2>/dev/null || true

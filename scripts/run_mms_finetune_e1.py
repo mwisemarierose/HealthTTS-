@@ -4,9 +4,9 @@
 Patches datasets.load_dataset so local DatasetDict paths from
 export_kin_train_datasets.py work with run_vits_finetuning.py.
 
-Copies the HF dataset metadata to $TMPDIR (or HF_DATASETS_CACHE) so
-datasets.map() cache arrow files do NOT fill /project (map writes
-cache next to load_from_disk roots).
+Also redirects Dataset.map/filter cache_file_name to $HF_DATASETS_CACHE
+(or $E1_SCRATCH) so preprocess Arrow caches do not grow inside
+kin_mms_hf on /project. Does NOT copy the full dataset (home quota).
 
   python scripts/run_mms_finetune_e1.py
   python scripts/run_mms_finetune_e1.py --config configs/e1_mms_kin_finetune.json
@@ -17,7 +17,6 @@ import argparse
 import json
 import os
 import runpy
-import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -55,20 +54,29 @@ def patch_load_dataset_for_disk() -> None:
     datasets.load_dataset = load_dataset  # type: ignore[assignment]
 
 
-def stage_dataset_on_tmp(src: Path) -> Path:
-    """Copy HF export to local scratch so map() caches stay off /project."""
-    root = Path(
-        os.environ.get("HF_DATASETS_CACHE")
-        or os.environ.get("TMPDIR")
-        or tempfile.gettempdir()
-    )
-    root.mkdir(parents=True, exist_ok=True)
-    dst = root / "kin_mms_hf_staged"
-    if dst.exists():
-        shutil.rmtree(dst)
-    print(f"Staging dataset {src} → {dst} (map caches will land here, not on /project)")
-    shutil.copytree(src, dst)
-    return dst
+def patch_map_filter_cache_dir(cache_root: Path) -> None:
+    """Force map/filter Arrow outputs under cache_root (not next to load_from_disk)."""
+    from datasets import Dataset
+
+    cache_root = Path(cache_root)
+    cache_root.mkdir(parents=True, exist_ok=True)
+    counter = {"i": 0}
+
+    def _next_prefix() -> str:
+        counter["i"] += 1
+        return str(cache_root / f"e1_ds_{counter['i']:03d}")
+
+    def _wrap(orig):
+        def wrapped(self, *args, **kwargs):
+            if kwargs.get("cache_file_name") is None:
+                kwargs["cache_file_name"] = _next_prefix()
+            return orig(self, *args, **kwargs)
+
+        return wrapped
+
+    Dataset.map = _wrap(Dataset.map)  # type: ignore[method-assign]
+    Dataset.filter = _wrap(Dataset.filter)  # type: ignore[method-assign]
+    print(f"datasets map/filter caches → {cache_root}")
 
 
 def main() -> None:
@@ -108,17 +116,18 @@ def main() -> None:
     if not train_script.is_file():
         raise SystemExit(f"Missing {train_script}\nRun: bash scripts/setup_mms_finetune.sh")
 
-    # Keep preprocess arrow caches on node-local disk.
-    staged = stage_dataset_on_tmp(ds_path)
-    cfg["dataset_name"] = str(staged)
-    runtime_cfg = Path(os.environ.get("TMPDIR", "/tmp")) / "e1_mms_runtime.json"
-    runtime_cfg.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
-
+    cache_root = Path(
+        os.environ.get("HF_DATASETS_CACHE")
+        or os.environ.get("E1_SCRATCH")
+        or tempfile.gettempdir()
+    )
     patch_load_dataset_for_disk()
+    patch_map_filter_cache_dir(cache_root)
+
     sys.path.insert(0, str(ft))
     os.chdir(ft)
-    sys.argv = [str(train_script), str(runtime_cfg)]
-    print(f"Launching {train_script} with {runtime_cfg}")
+    sys.argv = [str(train_script), str(args.config.resolve())]
+    print(f"Launching {train_script} with {args.config}")
     runpy.run_path(str(train_script), run_name="__main__")
 
 
