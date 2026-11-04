@@ -1,0 +1,17 @@
+{
+  "experiment": "E2-flex-kin",
+  "model": "/project/community/rmwisene/tts_baselines/finetune_e2_flex_kin/kinya_flex_tts_e2.pt",
+  "eval_split": "kinyarwanda_tts_mbaza_afrispeak/manifests/dev.csv",
+  "protocol": "ASR-loopback CTC + UTMOS + RTF on Kin pool DEV",
+  "n": 1253,
+  "synth_dir": "/project/community/rmwisene/tts_baselines/eval_kin_dev/flex_e2/dev",
+  "asr_nemo": "/project/community/rmwisene/asr/combined-ctc-15-ep-nocl.nemo",
+  "wer": 0.32923967459324155,
+  "cer": 0.0703133297928837,
+  "latency_s_mean": 0.025280686352753393,
+  "latency_s_median": 0.0227,
+  "rtf_mean": 0.007336552274541101,
+  "rtf_median": 0.0055,
+  "utmos_mean": 3.0404089098440963,
+  "utmos_median": 3.0046091079711914
+}

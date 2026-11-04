@@ -1,0 +1,18 @@
+{
+  "experiment": "E1-mms-kin",
+  "model_dir": "/project/community/rmwisene/tts_baselines/finetune_e1_mms_kin",
+  "eval_split": "kinyarwanda_tts_mbaza_afrispeak/manifests/dev.csv",
+  "protocol": "ASR-loopback CTC + UTMOS + RTF on Kin pool DEV (same foundation for all baselines)",
+  "note": "Reconstructed from Orchard score output 2026-10-29 after community wipe; values match original metrics.json",
+  "n": 1253,
+  "synth_dir": "/project/community/rmwisene/tts_baselines/eval_kin_dev/mms_e1/dev",
+  "asr_nemo": "/project/community/rmwisene/asr/combined-ctc-15-ep-nocl.nemo",
+  "wer": 0.4892834793491865,
+  "cer": 0.14076473712161444,
+  "latency_s_mean": 0.02831819632881085,
+  "latency_s_median": 0.0249,
+  "rtf_mean": 0.008335674381484437,
+  "rtf_median": 0.0062,
+  "utmos_mean": 2.8693153114197067,
+  "utmos_median": 2.843000888824463
+}
