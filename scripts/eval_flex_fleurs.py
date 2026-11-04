@@ -1,11 +1,20 @@
 #!/usr/bin/env python3
-"""Synthesize FLEURS eval texts with Kinya-Flex-TTS (DeepKIN).
+"""Synthesize eval texts with Kinya-Flex-TTS (DeepKIN).
+
+Supports FLEURS/Kidaw’ida TSV (id, text, audio_path) and Kin-pool CSV
+(utt_id, text, audio_path, source / speaker_id).
 
 Requires:
   bash scripts/setup_deepkin.sh
-  baselines at $BASELINES/kinya_flex_tts/kinya_flex_tts_base_trained.pt
+  checkpoint .pt under $BASELINES
 
-  python scripts/eval_flex_fleurs.py --split test --device cuda --speaker 0
+  # Kin pool DEV (E2)
+  python scripts/eval_flex_fleurs.py \\
+    --manifest_dir .../kinyarwanda_tts_mbaza_afrispeak/manifests \\
+    --split dev \\
+    --checkpoint .../finetune_e2_flex_kin/kinya_flex_tts_e2.pt \\
+    --out_dir .../eval_kin_dev/flex_e2 \\
+    --speaker -1
 """
 from __future__ import annotations
 
@@ -16,10 +25,66 @@ import sys
 import time
 from pathlib import Path
 
+# Flex: 0=Female1, 1=Female2, 2=Male — align Kin sources similarly to MMS eval
+SOURCE_TO_SPK = {
+    "afrispeak_female": 0,
+    "mbaza_tts": 1,
+    "afrispeak_male": 2,
+}
+
+
+def resolve_speaker_id(row: dict, default: int = 0) -> int:
+    raw = row.get("speaker_id", "")
+    if raw is not None and str(raw).strip() != "":
+        s = str(raw).strip()
+        try:
+            return int(s)
+        except ValueError:
+            pass
+        low = s.lower()
+        if "afrispeak_female" in low or low.startswith("af_f"):
+            return 0
+        if "afrispeak_male" in low or low.startswith("af_m"):
+            return 2
+        if "mbaza" in low:
+            return 1
+    source = (row.get("source") or "").strip()
+    return SOURCE_TO_SPK.get(source, default)
+
 
 def read_manifest(path: Path) -> list[dict]:
+    delim = "\t" if path.suffix.lower() == ".tsv" else ","
     with path.open(encoding="utf-8", newline="") as f:
-        return list(csv.DictReader(f, delimiter="\t"))
+        raw = list(csv.DictReader(f, delimiter=delim))
+    rows = []
+    for r in raw:
+        utt_id = (r.get("id") or r.get("utt_id") or "").strip()
+        text = (r.get("text") or "").strip()
+        audio = (r.get("audio_path") or r.get("path") or "").strip()
+        if not utt_id or not text:
+            continue
+        rows.append(
+            {
+                "id": utt_id,
+                "text": text,
+                "audio_path": audio,
+                "speaker_id": resolve_speaker_id(r),
+            }
+        )
+    return rows
+
+
+def resolve_manifest(manifest_dir: Path, split: str) -> Path:
+    for name in (f"{split}.tsv", f"{split}.csv"):
+        p = manifest_dir / name
+        if p.is_file():
+            return p
+    raise SystemExit(
+        f"Missing {manifest_dir}/{split}.tsv|csv\n"
+        "FLEURS: python scripts/clean_fleurs_eval.py | "
+        "Kidaw’ida: python scripts/prepare_kidawida_eval_manifest.py | "
+        "Kin pool: tts_data_cleaning/kinyarwanda_tts_mbaza_afrispeak/manifests"
+    )
 
 
 def main() -> None:
@@ -31,7 +96,7 @@ def main() -> None:
     p.add_argument(
         "--split",
         default="test",
-        help="Manifest basename without .tsv (test/dev; also Kidaw’ida eval)",
+        help="Manifest basename without extension (test/dev)",
     )
     p.add_argument(
         "--checkpoint",
@@ -43,7 +108,12 @@ def main() -> None:
         default=os.environ.get("BASELINES", "/project/community/rmwisene/tts_baselines")
         + "/eval_fleurs/kinya_flex_tts",
     )
-    p.add_argument("--speaker", type=int, default=0, help="0=F1, 1=F2, 2=Male")
+    p.add_argument(
+        "--speaker",
+        type=int,
+        default=0,
+        help="0=F1, 1=F2, 2=Male; -1 = use row speaker_id/source (Kin pool)",
+    )
     p.add_argument("--speed", type=float, default=1.0)
     p.add_argument("--limit", type=int, default=0)
     p.add_argument("--device", default="cuda")
@@ -68,13 +138,7 @@ def main() -> None:
     from deepkin.models.flex_tts import FlexKinyaTTS
     from deepkin.modules.tts_commons import intersperse
 
-    manifest = Path(args.manifest_dir) / f"{args.split}.tsv"
-    if not manifest.is_file():
-        raise SystemExit(
-            f"Missing {manifest}. "
-            "FLEURS: python scripts/clean_fleurs_eval.py | "
-            "Kidaw’ida: python scripts/prepare_kidawida_eval_manifest.py"
-        )
+    manifest = resolve_manifest(Path(args.manifest_dir), args.split)
     ckpt = Path(args.checkpoint)
     if not ckpt.is_file():
         raise SystemExit(
@@ -94,7 +158,9 @@ def main() -> None:
     out_dir = Path(args.out_dir) / args.split
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"Loading Kinya-Flex from {ckpt} on {device} (speaker={args.speaker}) …")
+    spk_msg = "per-utt" if args.speaker < 0 else str(args.speaker)
+    print(f"Manifest: {manifest}  (n={len(rows)})")
+    print(f"Loading Kinya-Flex from {ckpt} on {device} (speaker={spk_msg}) …")
     model = FlexKinyaTTS.from_pretrained(device, str(ckpt))
     model.eval()
     sample_rate = 24000
@@ -121,6 +187,7 @@ def main() -> None:
             utt_id = row["id"]
             text = row["text"]
             hyp = out_dir / f"{utt_id}.wav"
+            speaker = int(row["speaker_id"]) if args.speaker < 0 else args.speaker
 
             text_ids = intersperse(text_to_sequence(text, norm=True), 0)
 
@@ -128,7 +195,7 @@ def main() -> None:
                 torch.cuda.synchronize()
             t0 = time.perf_counter()
             with torch.no_grad():
-                audio = model(text_ids, args.speaker, speed=args.speed)
+                audio = model(text_ids, speaker, speed=args.speed)
             if device.type == "cuda":
                 torch.cuda.synchronize()
             synth_time = time.perf_counter() - t0
@@ -142,7 +209,6 @@ def main() -> None:
             dur = float(audio.shape[-1] / sample_rate)
             rtf = synth_time / dur if dur > 0 else float("nan")
 
-            # soundfile avoids torchaudio's torchcodec dependency
             sf.write(str(hyp), audio, sample_rate)
             w.writerow(
                 {
@@ -153,7 +219,7 @@ def main() -> None:
                     "duration_s": f"{dur:.3f}",
                     "synth_time_s": f"{synth_time:.4f}",
                     "rtf": f"{rtf:.4f}",
-                    "speaker": str(args.speaker),
+                    "speaker": str(speaker),
                 }
             )
             if i % 10 == 0 or i == len(rows):
