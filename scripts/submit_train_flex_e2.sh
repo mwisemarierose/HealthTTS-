@@ -22,13 +22,15 @@ WANDB_PROJECT="${WANDB_PROJECT:-healthtts}"
 WANDB_RUN_NAME="${WANDB_RUN_NAME:-E2-flex-kin}"
 
 SLURM_PARTITION="${SLURM_PARTITION:-general}"
-SLURM_TIME="${SLURM_TIME:-8:00:00}"
+SLURM_TIME="${SLURM_TIME:-12:00:00}"
 SLURM_MEM="${SLURM_MEM:-64G}"
 SLURM_CPUS="${SLURM_CPUS:-8}"
 SLURM_GPUS="${SLURM_GPUS:-1}"
 SLURM_JOB_NAME="${SLURM_JOB_NAME:-e2-flex-kin}"
 
-NUM_ITERS="${NUM_ITERS:-25000}"
+# Base ckpt stores iter≈1e6; DeepKIN treats --num_iters as absolute end_iter.
+# 1_000_000 + 25_000 ≈ 30 ep more fine-tune (do NOT use 25000 alone — job exits instantly).
+NUM_ITERS="${NUM_ITERS:-1025000}"
 BATCH_SIZE="${BATCH_SIZE:-8}"
 ACCUM="${ACCUM:-2}"
 WARMUP="${WARMUP:-1000}"
@@ -69,6 +71,8 @@ source "\${HOME}/miniforge3/etc/profile.d/conda.sh"
 conda activate healthtts
 
 export DEEPKIN_ROOT="${DEEPKIN_ROOT}"
+# Package is DeepKIN-AgAI/monotonic_align/ (needs core.cpython-311*.so beside __init__.py).
+# Do NOT prepend .../monotonic_align — nested dir only has a py312 .so and shadows the package.
 export PYTHONPATH="${DEEPKIN_ROOT}:\${PYTHONPATH:-}"
 export FLEX_DATA="${FLEX_DATA}"
 export SAVE_CKPT="${SAVE_CKPT}"
@@ -83,7 +87,18 @@ export TMPDIR="/tmp/e2_flex_\${SLURM_JOB_ID}"
 mkdir -p "\$TMPDIR"
 
 cd "${REPO_ROOT}"
-pip install -q wandb 2>/dev/null || true
+pip install -q wandb progressbar2 Cython 2>/dev/null || true
+# Build core*.so for *this* Python (3.11). Nested monotonic_align/*.so is py312 — ignore it.
+if [[ -d "${DEEPKIN_ROOT}/monotonic_align" ]]; then
+  (
+    cd "${DEEPKIN_ROOT}/monotonic_align"
+    python setup.py build_ext --inplace
+    ls -lh core.cpython-*.so
+  )
+fi
+export PYTHONPATH="${DEEPKIN_ROOT}:${PYTHONPATH:-}"
+python -c "from monotonic_align.core import maximum_path_c; print('monotonic_align OK')" \
+  || { echo "FATAL: monotonic_align.core missing — fix setup before train"; exit 1; }
 nvidia-smi || true
 
 python scripts/run_flex_finetune_e2.py \\

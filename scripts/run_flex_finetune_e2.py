@@ -53,7 +53,8 @@ def main() -> None:
             "/project/community/rmwisene/tts_baselines/finetune_e2_flex_kin/kinya_flex_tts_e2.pt",
         ),
     )
-    ap.add_argument("--num_iters", type=int, default=int(os.environ.get("NUM_ITERS", "25000")))
+    # Absolute end_iter (pretrained Flex ckpt resumes ~1e6). Default = 1e6 + 25k.
+    ap.add_argument("--num_iters", type=int, default=int(os.environ.get("NUM_ITERS", "1025000")))
     ap.add_argument("--batch_size", type=int, default=int(os.environ.get("BATCH_SIZE", "8")))
     ap.add_argument("--accumulation_steps", type=int, default=int(os.environ.get("ACCUM", "2")))
     ap.add_argument("--warmup_iter", type=int, default=int(os.environ.get("WARMUP", "1000")))
@@ -119,6 +120,7 @@ def main() -> None:
     ]
 
     env = os.environ.copy()
+    # Parent of package dir monotonic_align/ (with core.cpython-3xx*.so in-place)
     env["PYTHONPATH"] = f"{args.deepkin_root}:{env.get('PYTHONPATH', '')}"
 
     print("Launching:", " ".join(cmd), flush=True)

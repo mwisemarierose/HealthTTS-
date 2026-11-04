@@ -10,14 +10,15 @@ tts_train_data_file: tts_train_data.psv
 tts_dev_data_file: tts_dev_data.psv
 model_save_path: /project/community/rmwisene/tts_baselines/finetune_e2_flex_kin/kinya_flex_tts_e2.pt
 
-# ~30 epochs on ~13.6k clips, batch 8, accum 2 → ~850 steps/epoch → ~25k iters
+# ~30 epochs on ~13.6k clips, batch 8, accum 2 → ~850 steps/epoch → ~25k new iters.
+# DeepKIN --num_iters is absolute end_iter; base ckpt resumes at ~1_000_000.
 model_variant: flex_tts:base
 gpus: 1
 enable_amp: false
 use_ddp: false
 batch_size: 8
 accumulation_steps: 2
-num_iters: 25000
+num_iters: 1025000
 warmup_iter: 1000
 peak_lr: 2.0e-4
 checkpoint_steps: 1000
