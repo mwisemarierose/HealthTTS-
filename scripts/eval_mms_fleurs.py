@@ -27,6 +27,9 @@ SOURCE_TO_SPK = {
     "afrispeak_female": 0,
     "mbaza_tts": 1,
     "afrispeak_male": 2,
+    # E3 bilingual: Dav speaker table starts at 3
+    "kidawida_cv27": 3,
+    "kidawida_asr_expanded": 3,
 }
 
 
