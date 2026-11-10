@@ -1,0 +1,26 @@
+# E4: Fine-tune Kinya-Flex on Kin + balanced Dav (~17.89 h each).
+# Init from B1 base (not E2). DeepKIN --num_iters is absolute end_iter;
+# base ckpt resumes ~1_000_000. ~50 epochs on ~30k clips ≈ +95k iters.
+
+experiment: E4
+init_checkpoint: /project/community/rmwisene/tts_baselines/kinya_flex_tts/kinya_flex_tts_base_trained.pt
+tts_data_dir: /project/community/rmwisene/tts_data_cleaning/bilingual_flex_data_balanced
+tts_train_data_file: tts_train_data.psv
+tts_dev_data_file: tts_dev_data.psv
+model_save_path: /project/community/rmwisene/tts_baselines/finetune_e4_flex_bilingual_balanced/kinya_flex_tts_e4.pt
+
+model_variant: flex_tts:base
+gpus: 1
+enable_amp: false
+use_ddp: false
+batch_size: 8
+accumulation_steps: 2
+num_iters: 1095000
+warmup_iter: 1000
+peak_lr: 2.0e-4
+checkpoint_steps: 1000
+validation_steps: 2000
+train_log_steps: 20
+load_saved_model: true
+dataloader_num_workers: 4
+num_losses: 8

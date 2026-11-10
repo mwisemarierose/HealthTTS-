@@ -1,0 +1,16 @@
+{
+  "experiment": "E3-mms-bilingual-balanced",
+  "eval_lang": "kinyarwanda",
+  "eval_split": "test",
+  "n": 727,
+  "synth_dir": "/project/community/rmwisene/tts_baselines/eval_kin/mms_e3/test",
+  "asr_nemo": "/project/community/rmwisene/asr/combined-ctc-15-ep-nocl.nemo",
+  "wer": 0.4930851063829787,
+  "cer": 0.1429434487303883,
+  "latency_s_mean": 0.024612379642365886,
+  "latency_s_median": 0.0245,
+  "rtf_mean": 0.006982530949105914,
+  "rtf_median": 0.0057,
+  "utmos_mean": 2.8282641774194603,
+  "utmos_median": 2.808291435241699
+}

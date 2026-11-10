@@ -285,7 +285,7 @@ ls "$DATA"
 ## Notes
 
 - Kidaw’ida is from **Mozilla Data Collective**, not Hugging Face.
-- **`fleurs_kinyarwanda` = baseline evaluation only** — never use it for training/adaptation.
+- `fleurs_kinyarwanda` **= baseline evaluation only** — never use it for training/adaptation.
 - Never store large audio under `~/` (home quota); never commit API keys.
 
 ## Load baselines (Kin)

@@ -74,8 +74,17 @@ def main() -> None:
     except ImportError as e:
         raise SystemExit("pip install wandb") from e
 
+    # Infer tags from run name (E2 kin-only vs E4 bilingual, etc.)
+    run_l = (args.wandb_run_name or "").lower()
+    if "e4" in run_l or "bilingual" in run_l:
+        exp, tags = "E4", ["E4", "flex", "bilingual", "balanced"]
+    elif "e6" in run_l:
+        exp, tags = "E6", ["E6", "flex", "bilingual", "full"]
+    else:
+        exp, tags = "E2", ["E2", "flex", "kin-only"]
+
     cfg = {
-        "experiment": "E2",
+        "experiment": exp,
         "model": "kinya-flex",
         "num_iters": args.num_iters,
         "batch_size": args.batch_size,
@@ -89,7 +98,7 @@ def main() -> None:
         project=args.wandb_project,
         name=args.wandb_run_name,
         config=cfg,
-        tags=["E2", "flex", "kin-only"],
+        tags=tags,
     )
 
     cmd = [
