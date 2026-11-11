@@ -1,0 +1,49 @@
+# Human listening — validate UTMOS vs intelligibility trade-off
+# (automatic UTMOS often fell after bilingual FT while WER improved)
+
+task: naturalness_preference_plus_intelligibility
+languages: [kinyarwanda, kidawida]
+
+# Blind pairwise preference (same text, two systems)
+pairs:
+  kidawida:
+    # Main RQ1 trade-off: zero-shot naturalness vs bilingual intelligibility
+    - id: dav_b0_vs_e3
+      a: { label: B0-mms-zeroshot, synth_dir: /project/community/rmwisene/tts_baselines/eval_kidawida/mms_tts_kin/test }
+      b: { label: E3-mms-bilingual, synth_dir: /project/community/rmwisene/tts_baselines/eval_kidawida/mms_e3/test }
+    - id: dav_b1_vs_e4
+      a: { label: B1-flex-zeroshot, synth_dir: /project/community/rmwisene/tts_baselines/eval_kidawida/kinya_flex_tts/test }
+      b: { label: E4-flex-bilingual, synth_dir: /project/community/rmwisene/tts_baselines/eval_kidawida/flex_e4/test }
+  kinyarwanda:
+    # Kin: bilingual vs Kin-only / baseline (did FT hurt naturalness?)
+    - id: kin_e2_vs_e4
+      a: { label: E2-flex-kin-only, synth_dir: /project/community/rmwisene/tts_baselines/eval_kin_dev/flex_e2/dev }
+      b: { label: E4-flex-bilingual, synth_dir: /project/community/rmwisene/tts_baselines/eval_kin/flex_e4/dev }
+    - id: kin_e1_vs_e3
+      a: { label: E1-mms-kin-only, synth_dir: /project/community/rmwisene/tts_baselines/eval_kin_dev/mms_e1/dev }
+      b: { label: E3-mms-bilingual, synth_dir: /project/community/rmwisene/tts_baselines/eval_kin/mms_e3/dev }
+
+sampling:
+  n_items_per_pair: 30          # utterances per pair (same text in A and B)
+  seed: 42
+  prefer_high_utmos_gap: true   # if scores.tsv has utmos, prefer large |ΔUTMOS|
+  min_duration_s: 1.0
+  max_duration_s: 12.0
+
+listeners:
+  n_listeners_target: 8         # native / fluent where possible
+  ratings_per_item: 3           # ≥3 listeners per clip pair
+
+questions:
+  - id: naturalness
+    type: preference            # A better | B better | equal
+    prompt: "Which sounds more natural / human-like?"
+  - id: intelligibility
+    type: preference
+    prompt: "Which is easier to understand?"
+  # optional absolute MOS (1–5) if you want correlation with UTMOS
+  - id: mos_naturalness
+    type: mos_1_5
+    prompt: "Rate naturalness of the clip you just heard (play one system at a time)."
+
+output_dir: /project/community/rmwisene/tts_baselines/listening_eval

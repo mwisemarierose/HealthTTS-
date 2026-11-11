@@ -1,0 +1,16 @@
+{
+  "experiment": "E4-flex-bilingual-balanced",
+  "eval_lang": "kidawida",
+  "eval_split": "test",
+  "n": 1004,
+  "synth_dir": "/project/community/rmwisene/tts_baselines/eval_kidawida/flex_e4/test",
+  "asr_nemo": "/project/community/rmwisene/asr/combined-ctc-15-ep-nocl.nemo",
+  "wer": 0.43400637619553667,
+  "cer": 0.11020131749061134,
+  "latency_s_mean": 0.021655478087649404,
+  "latency_s_median": 0.0193,
+  "rtf_mean": 0.009531374501992033,
+  "rtf_median": 0.0087,
+  "utmos_mean": 2.823942092072916,
+  "utmos_median": 2.818208694458008
+}

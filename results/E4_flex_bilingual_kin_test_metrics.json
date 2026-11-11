@@ -1,0 +1,16 @@
+{
+  "experiment": "E4-flex-bilingual-balanced",
+  "eval_lang": "kinyarwanda",
+  "eval_split": "test",
+  "n": 727,
+  "synth_dir": "/project/community/rmwisene/tts_baselines/eval_kin/flex_e4/test",
+  "asr_nemo": "/project/community/rmwisene/asr/combined-ctc-15-ep-nocl.nemo",
+  "wer": 0.35997340425531915,
+  "cer": 0.08549512110283214,
+  "latency_s_mean": 0.02446423658872077,
+  "latency_s_median": 0.025,
+  "rtf_mean": 0.006955708390646492,
+  "rtf_median": 0.0055,
+  "utmos_mean": 3.01373760883877,
+  "utmos_median": 2.949227809906006
+}
