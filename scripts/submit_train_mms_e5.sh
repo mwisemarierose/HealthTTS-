@@ -24,7 +24,8 @@ WANDB_RUN_NAME="${WANDB_RUN_NAME:-E5-mms-bilingual-full}"
 
 SLURM_PARTITION="${SLURM_PARTITION:-general}"
 SLURM_TIME="${SLURM_TIME:-12:00:00}"
-SLURM_MEM="${SLURM_MEM:-64G}"
+# Full Dav set is larger — preprocess map is memory-heavy with multiple workers
+SLURM_MEM="${SLURM_MEM:-128G}"
 SLURM_CPUS="${SLURM_CPUS:-8}"
 SLURM_GPUS="${SLURM_GPUS:-1}"
 SLURM_JOB_NAME="${SLURM_JOB_NAME:-e5-mms-full}"
