@@ -74,12 +74,12 @@ def main() -> None:
     except ImportError as e:
         raise SystemExit("pip install wandb") from e
 
-    # Infer tags from run name (E2 kin-only vs E4 bilingual, etc.)
+    # Infer tags from run name (check E6 before generic "bilingual")
     run_l = (args.wandb_run_name or "").lower()
-    if "e4" in run_l or "bilingual" in run_l:
-        exp, tags = "E4", ["E4", "flex", "bilingual", "balanced"]
-    elif "e6" in run_l:
+    if "e6" in run_l:
         exp, tags = "E6", ["E6", "flex", "bilingual", "full"]
+    elif "e4" in run_l or "bilingual" in run_l:
+        exp, tags = "E4", ["E4", "flex", "bilingual", "balanced"]
     else:
         exp, tags = "E2", ["E2", "flex", "kin-only"]
 
